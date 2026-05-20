@@ -10,7 +10,7 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass
-from typing import Iterable, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -79,9 +79,11 @@ class SentencePieceAdapter(BaseAdapter):
             ) from exc
 
         self._vocab_size = vocab_size
-        self.model_file = f"{model_prefix or tempfile.mktemp(prefix='flued_spm_')}.model"
+        tmp_dir = tempfile.mkdtemp(prefix="flued_spm_")
+        safe_prefix = model_prefix or os.path.join(tmp_dir, "spm")
+        self.model_file = f"{safe_prefix}.model"
         if not os.path.exists(self.model_file):
-            input_path = tempfile.mktemp(prefix="flued_spm_corpus_", suffix=".txt")
+            input_path = os.path.join(tmp_dir, "corpus.txt")
             with open(input_path, "w", encoding="utf-8") as fh:
                 for line in texts:
                     fh.write(line + "\n")
@@ -210,7 +212,9 @@ def build_dataset_for_adapter(model_name: str, adapter: BaseAdapter, texts: List
     return TokenIdReconstructionDataset(tokenized, seq_len=seq_len)
 
 
-def evaluate_perplexity(model: torch.nn.Module, loader: DataLoader, device: torch.device, max_batches: int = 20) -> tuple[float, Optional[float]]:
+def evaluate_perplexity(
+    model: torch.nn.Module, loader: DataLoader, device: torch.device, max_batches: int = 20
+) -> Tuple[float, Optional[float]]:
     model.eval()
     criterion = nn.CrossEntropyLoss(ignore_index=0)
     total_loss = 0.0
@@ -255,7 +259,9 @@ def score_cloze(model: torch.nn.Module, adapter: BaseAdapter, item: ClozeItem, d
     return int(min(range(len(losses)), key=lambda i: losses[i]))
 
 
-def evaluate_logic_tasks(model: torch.nn.Module, adapter: BaseAdapter, task_items: dict[str, List[ClozeItem]], device: torch.device) -> float:
+def evaluate_logic_tasks(
+    model: torch.nn.Module, adapter: BaseAdapter, task_items: Dict[str, List[ClozeItem]], device: torch.device
+) -> float:
     total = 0
     correct = 0
     for items in task_items.values():

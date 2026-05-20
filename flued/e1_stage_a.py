@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 from dataclasses import replace
+from typing import Tuple
 
 import torch
 from torch.utils.data import random_split
@@ -33,7 +34,7 @@ E1_PRESETS = {
 }
 
 
-def build_e1_configs(preset: str = "smoke_cpu") -> tuple[ModelConfig, TrainConfig]:
+def build_e1_configs(preset: str = "smoke_cpu") -> Tuple[ModelConfig, TrainConfig]:
     if preset not in E1_PRESETS:
         raise ValueError(f"Unknown E1 preset: {preset}")
     model_cfg = ModelConfig(model_type="flued", **E1_PRESETS[preset]["model"]).apply_size()

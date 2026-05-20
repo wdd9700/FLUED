@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -256,7 +256,7 @@ class ClozeItem:
     answer: int
 
 
-def tiny_chinese_logic_samples() -> dict[str, List[ClozeItem]]:
+def tiny_chinese_logic_samples() -> Dict[str, List[ClozeItem]]:
     """Tiny built-in smoke data for E2 few-shot style tasks."""
     return {
         "idiom_cloze": [

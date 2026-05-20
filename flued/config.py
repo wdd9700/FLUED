@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 
 SIZE_CONFIGS: Dict[str, Dict[str, Any]] = {
@@ -88,7 +88,7 @@ class TrainConfig:
     num_workers: int = 0
 
 
-def parse_args() -> tuple[ModelConfig, TrainConfig]:
+def parse_args() -> Tuple[ModelConfig, TrainConfig]:
     parser = argparse.ArgumentParser(
         description="FLUED local trainer",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
