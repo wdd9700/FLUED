@@ -36,7 +36,13 @@ def text_to_byte_ids(text: str) -> List[int]:
 
 def byte_ids_to_text(token_ids: Sequence[int]) -> str:
     """Decode PAD-offset byte ids back to text (ignores PAD ids)."""
-    byte_values = [max(0, min(255, tid - BYTE_OFFSET)) for tid in token_ids if tid != PAD_ID]
+    byte_values: List[int] = []
+    for tid in token_ids:
+        if tid == PAD_ID:
+            continue
+        if tid < BYTE_OFFSET or tid >= BYTE_VOCAB_SIZE:
+            raise ValueError(f"Invalid byte token id: {tid}")
+        byte_values.append(tid - BYTE_OFFSET)
     return bytes(byte_values).decode("utf-8", errors="replace")
 
 

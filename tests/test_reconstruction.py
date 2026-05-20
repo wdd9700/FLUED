@@ -38,7 +38,7 @@ def test_tokenizer_adapters_graceful_when_optional_dependency_missing(monkeypatc
 
     def fake_import_module(name: str):
         if name in {"sentencepiece", "tiktoken"}:
-            raise ImportError(name)
+            raise ImportError(f"No module named {name}")
         return original_import_module(name)
 
     monkeypatch.setattr(importlib, "import_module", fake_import_module)

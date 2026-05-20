@@ -8,6 +8,7 @@ import importlib
 import json
 import logging
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -79,7 +80,9 @@ class SentencePieceAdapter(BaseAdapter):
             ) from exc
 
         self._vocab_size = vocab_size
+        # If model_prefix points to an existing model, training corpus texts are ignored.
         tmp_dir = tempfile.mkdtemp(prefix="flued_spm_")
+        self._tmp_dir: Optional[str] = tmp_dir if model_prefix is None else None
         safe_prefix = model_prefix or os.path.join(tmp_dir, "spm")
         self.model_file = f"{safe_prefix}.model"
         if not os.path.exists(self.model_file):
@@ -98,6 +101,10 @@ class SentencePieceAdapter(BaseAdapter):
                 unk_id=1,
             )
         self.processor = self.spm.SentencePieceProcessor(model_file=self.model_file)
+
+    def __del__(self) -> None:
+        if self._tmp_dir and os.path.isdir(self._tmp_dir):
+            shutil.rmtree(self._tmp_dir, ignore_errors=True)
 
     @property
     def vocab_size(self) -> int:

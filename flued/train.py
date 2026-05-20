@@ -50,7 +50,7 @@ def build_model(model_cfg: ModelConfig) -> nn.Module:
             target_compression=model_cfg.target_compression,
         )
 
-    if model_cfg.model_type == "bpe":
+    elif model_cfg.model_type == "bpe":
         from bpe_baseline.model import BPETransformerAutoencoder
 
         return BPETransformerAutoencoder(
@@ -64,7 +64,7 @@ def build_model(model_cfg: ModelConfig) -> nn.Module:
             dropout=model_cfg.dropout,
         )
 
-    if model_cfg.model_type == "blt":
+    elif model_cfg.model_type == "blt":
         from blt_baseline.model import BLTAutoencoder
 
         return BLTAutoencoder(
@@ -87,7 +87,9 @@ def build_dataset(model_cfg: ModelConfig, train_cfg: TrainConfig) -> Tuple[torch
     texts = None
     if train_cfg.data_path:
         with open(train_cfg.data_path, encoding="utf-8") as fh:
-            texts = [line.rstrip("\n") for line in fh]
+            texts = [line.rstrip("\n") for line in fh if line.strip()]
+        if not texts:
+            raise ValueError(f"No non-empty lines found in data file: {train_cfg.data_path}")
 
     if model_cfg.model_type == "bpe":
         corpus = texts if texts is not None else STUB_CORPUS
@@ -173,7 +175,12 @@ class Trainer:
         self.criterion = nn.CrossEntropyLoss(ignore_index=0)
 
         amp_enabled = train_cfg.amp and device.type == "cuda"
-        self.amp_dtype = torch.bfloat16 if train_cfg.amp_dtype == "bf16" else torch.float16
+        if train_cfg.amp_dtype == "bf16":
+            self.amp_dtype = torch.bfloat16
+        elif train_cfg.amp_dtype == "fp16":
+            self.amp_dtype = torch.float16
+        else:
+            raise ValueError(f"Unsupported amp_dtype: {train_cfg.amp_dtype}")
         self.autocast_ctx = (lambda: torch.autocast(device_type="cuda", dtype=self.amp_dtype, enabled=amp_enabled))
         self.scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled and self.amp_dtype == torch.float16)
 
