@@ -1,340 +1,94 @@
-"""
-FLUED Stage A Autoencoder — Dynamic Semantic Compiler.
+"""FLUED v0.4 minimal model.
 
-Architecture summary
---------------------
-  1. Byte embedding + sinusoidal positional encoding
-  2. ShallowEncoder (DSC front-end): 2–4 Transformer layers that also
-     accumulate cross-layer Attention Residuals (AttenRes).
-  3. SGLGatingModule: maps (hidden, attenres) → three gate signals per
-     position: γ_compress, γ_expand, γ_bridge.
-  4. DynamicLatentEncoder: differentiable soft-pooling driven by γ_compress,
-     producing a same-length latent that encodes variable-granularity spans.
-  5. DeepEncoder: additional Transformer layers to refine the latent.
-  6. TransformerDecoder: reconstructs the byte sequence from the latent.
-
-Auxiliary loss: SGL gate entropy regularisation (prevents gate collapse).
+ONE idea: semantic units are dynamically compiled in prefill and decode is an
+inverse/tied-weight expansion process.
 """
+
+from __future__ import annotations
 
 import math
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ---------------------------------------------------------------------------
-# Shared sub-modules
-# ---------------------------------------------------------------------------
-
-
 class PositionalEncoding(nn.Module):
-    """Standard sinusoidal positional encoding (Vaswani et al., 2017)."""
-
     def __init__(self, d_model: int, max_len: int = 4096, dropout: float = 0.1) -> None:
         super().__init__()
         self.dropout = nn.Dropout(dropout)
-
         pe = torch.zeros(max_len, d_model)
         pos = torch.arange(max_len, dtype=torch.float).unsqueeze(1)
-        div = torch.exp(
-            torch.arange(0, d_model, 2, dtype=torch.float)
-            * (-math.log(10000.0) / d_model)
-        )
+        div = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(pos * div)
         pe[:, 1::2] = torch.cos(pos * div)
-        # Register as buffer so it moves with .to(device) but is not a parameter
-        self.register_buffer("pe", pe.unsqueeze(0))  # [1, max_len, d_model]
+        self.register_buffer("pe", pe.unsqueeze(0))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: [B, T, d_model]"""
-        x = x + self.pe[:, : x.size(1)]  # type: ignore[index]
-        return self.dropout(x)
+        return self.dropout(x + self.pe[:, : x.size(1)])
 
 
-# ---------------------------------------------------------------------------
-# FLUED-specific sub-modules
-# ---------------------------------------------------------------------------
+class TiedTransformerBlock(nn.Module):
+    """Single residual block used in both encode and inverse decode."""
 
-
-class ShallowEncoder(nn.Module):
-    """DSC front-end: shallow Transformer encoder that also computes AttenRes.
-
-    AttenRes (Attention Residual) is defined as the weighted sum of
-    per-layer hidden-state differences:
-
-        R_l = H^{l+1} - H^l                           (layer-wise change)
-        AttenRes = Σ_l  softmax(w)_l · R_l            (weighted aggregate)
-
-    The learnable weights w_l let the network attend to shallow (syntactic)
-    vs. deep (semantic) layer signals.
-    """
-
-    def __init__(
-        self,
-        d_model: int,
-        nhead: int,
-        dim_feedforward: int,
-        num_layers: int,
-        dropout: float = 0.1,
-    ) -> None:
+    def __init__(self, d_model: int, nhead: int, dim_feedforward: int, dropout: float) -> None:
         super().__init__()
-        self.layers = nn.ModuleList(
-            [
-                nn.TransformerEncoderLayer(
-                    d_model=d_model,
-                    nhead=nhead,
-                    dim_feedforward=dim_feedforward,
-                    dropout=dropout,
-                    batch_first=True,
-                    norm_first=True,  # Pre-LN for training stability
-                )
-                for _ in range(num_layers)
-            ]
-        )
-        # Learnable per-layer aggregation weights for AttenRes
-        self.layer_weights = nn.Parameter(torch.ones(num_layers) / num_layers)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        src_key_padding_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            x:                    [B, T, d_model] embedded input
-            src_key_padding_mask: [B, T] bool mask (True = padding position)
-
-        Returns:
-            final_hidden: [B, T, d_model] hidden states after all layers
-            attenres:     [B, T, d_model] weighted aggregate of layer residuals
-        """
-        h = x
-        residuals = []
-        for layer in self.layers:
-            h_next = layer(h, src_key_padding_mask=src_key_padding_mask)
-            residuals.append(h_next - h)
-            h = h_next
-
-        # Weighted sum of residuals (softmax normalises the weights)
-        weights = torch.softmax(self.layer_weights, dim=0)  # [num_layers]
-        attenres = sum(w * r for w, r in zip(weights, residuals))  # [B, T, d]
-        return h, attenres  # type: ignore[return-value]
-
-
-class SGLGatingModule(nn.Module):
-    """Self-Gating Logic (SGL) module.
-
-    Takes the shallow encoder's hidden states and AttenRes signal and
-    produces three sigmoid gate values per sequence position:
-
-      γ_compress ∈ [0,1] — high → merge this position into the preceding span
-      γ_expand   ∈ [0,1] — high → force a semantic boundary here
-      γ_bridge   ∈ [0,1] — high → write a bridge potential for long-range links
-
-    Also computes the bridge potential vector P_i = γ_bridge_i · MLP(h_i).
-    """
-
-    def __init__(self, d_model: int) -> None:
-        super().__init__()
-        # Maps concatenated [hidden ‖ attenres] → 3 gate logits
-        self.gate_mlp = nn.Sequential(
-            nn.Linear(d_model * 2, d_model),
+        self.ln1 = nn.LayerNorm(d_model)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, dim_feedforward),
             nn.GELU(),
-            nn.Linear(d_model, 3),
+            nn.Dropout(dropout),
+            nn.Linear(dim_feedforward, d_model),
         )
-        # Projection for bridge potential vectors
-        self.bridge_proj = nn.Linear(d_model, d_model)
+        self.drop = nn.Dropout(dropout)
 
-    def forward(
-        self,
-        hidden: torch.Tensor,
-        attenres: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            hidden:   [B, T, d_model]
-            attenres: [B, T, d_model]
+    def forward_block(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        y, _ = self.self_attn(self.ln1(x), self.ln1(x), self.ln1(x), key_padding_mask=key_padding_mask, need_weights=False)
+        x = x + self.drop(y)
+        x = x + self.drop(self.ffn(self.ln2(x)))
+        return x
 
-        Returns:
-            gamma_compress:   [B, T]
-            gamma_expand:     [B, T]
-            gamma_bridge:     [B, T]
-            bridge_potential: [B, T, d_model]
-        """
-        combined = torch.cat([hidden, attenres], dim=-1)  # [B, T, 2d]
-        gates = torch.sigmoid(self.gate_mlp(combined))    # [B, T, 3]
-
-        gamma_compress = gates[..., 0]   # [B, T]
-        gamma_expand   = gates[..., 1]   # [B, T]
-        gamma_bridge   = gates[..., 2]   # [B, T]
-
-        # Bridge potential: gated linear projection of hidden state
-        bridge_potential = gamma_bridge.unsqueeze(-1) * self.bridge_proj(hidden)
-        return gamma_compress, gamma_expand, gamma_bridge, bridge_potential
-
-
-class DynamicLatentEncoder(nn.Module):
-    """Differentiable soft-pooling driven by the compress gate.
-
-    Instead of hard span segmentation (not differentiable), we implement a
-    soft exponential running average: each position t blends its own hidden
-    state with the accumulated context from the left, weighted by γ_compress.
-
-        acc_0 = h_0
-        acc_t = γ_compress_t · acc_{t-1} + (1 − γ_compress_t) · h_t
-
-    When γ_compress ≈ 1 the accumulator carries the left context (merge);
-    when γ_compress ≈ 0 the accumulator resets to the current position (new span).
-
-    The accumulated vector is then concatenated with AttenRes and refined by
-    a small MLP to produce the final latent — carrying a "compressed fingerprint"
-    of the span's internal structure.
-    """
-
-    def __init__(self, d_model: int) -> None:
-        super().__init__()
-        self.span_refine = nn.Sequential(
-            nn.Linear(d_model * 2, d_model),
-            nn.GELU(),
-            nn.Linear(d_model, d_model),
-        )
-
-    def forward(
-        self,
-        hidden: torch.Tensor,
-        attenres: torch.Tensor,
-        gamma_compress: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Args:
-            hidden:         [B, T, d_model]
-            attenres:       [B, T, d_model]
-            gamma_compress: [B, T] ∈ [0, 1]
-
-        Returns:
-            latent: [B, T, d_model] soft-pooled latent representation
-        """
-        B, T, d = hidden.shape
-
-        # Sequential soft accumulation over time.
-        # NOTE: This loop is intentionally sequential (each step depends on the
-        # previous accumulator), which prevents parallelisation. For Stage A
-        # correctness this is acceptable; a production implementation should
-        # replace this with a parallel scan using cumulative products:
-        #   log-space cumprod of γ_compress, then weighted prefix sums.
-        acc = hidden[:, 0, :]                   # [B, d]
-        accumulated = [acc]
-        for t in range(1, T):
-            g = gamma_compress[:, t].unsqueeze(-1)  # [B, 1]
-            acc = g * acc + (1.0 - g) * hidden[:, t, :]
-            accumulated.append(acc)
-
-        # Stack back to [B, T, d]
-        accumulated_t = torch.stack(accumulated, dim=1)
-
-        # Refine: blend with AttenRes fingerprint
-        latent = self.span_refine(torch.cat([accumulated_t, attenres], dim=-1))
-        return latent
-
-
-# ---------------------------------------------------------------------------
-# Main model
-# ---------------------------------------------------------------------------
+    def inverse_block(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # Approximate inverse using the same tied parameters.
+        y, _ = self.self_attn(self.ln1(x), self.ln1(x), self.ln1(x), key_padding_mask=key_padding_mask, need_weights=False)
+        x = x - self.drop(y)
+        x = x - self.drop(self.ffn(self.ln2(x)))
+        return x
 
 
 class FLUEDAutoencoder(nn.Module):
-    """FLUED Stage A Autoencoder (Dynamic Semantic Compiler).
-
-    Full forward pass:
-      src → embed → ShallowEncoder → SGLGating → DynamicLatentEncoder
-          → DeepEncoder → TransformerDecoder (teacher-forced) → logits
-
-    Loss = cross-entropy reconstruction + SGL gate entropy regularisation.
-    """
+    """FLUED v0.4 dynamic semantic-unit autoencoder."""
 
     def __init__(
         self,
-        vocab_size: int = 256,
+        vocab_size: int = 257,
         d_model: int = 256,
-        nhead: int = 4,
+        nhead: int = 8,
         dim_feedforward: int = 1024,
-        num_encoder_layers: int = 4,
-        num_decoder_layers: int = 4,
-        max_seq_len: int = 512,
+        num_layers: int = 4,
+        max_seq_len: int = 256,
         dropout: float = 0.1,
-        shallow_layers: int = 2,
-        gate_entropy_weight: float = 0.01,
+        boundary_threshold: float = 0.5,
+        target_compression: float = 0.3,
+        **_: Any,
     ) -> None:
         super().__init__()
         self.vocab_size = vocab_size
         self.d_model = d_model
-        self.gate_entropy_weight = gate_entropy_weight
+        self.boundary_threshold = boundary_threshold
+        self.target_compression = target_compression
 
-        # --- Input representation ---
         self.embedding = nn.Embedding(vocab_size, d_model, padding_idx=0)
-        self.pos_enc = PositionalEncoding(d_model, max_len=max_seq_len * 2, dropout=dropout)
-
-        # --- DSC front-end ---
-        # Clamp shallow_layers so that:
-        #   (a) shallow_layers ≥ 1 (ShallowEncoder needs at least one layer), and
-        #   (b) num_encoder_layers - shallow_layers ≥ 1 (deep encoder needs at least one).
-        # Using min(shallow_layers, max(1, num_encoder_layers - 1)) satisfies both
-        # when num_encoder_layers ≥ 2; when num_encoder_layers == 1 shallow=1 and
-        # deep_layers is clamped to 1 below.
-        self.shallow_layers = min(max(1, shallow_layers), max(1, num_encoder_layers - 1))
-        self.shallow_enc = ShallowEncoder(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            num_layers=self.shallow_layers,
-            dropout=dropout,
+        self.pos = PositionalEncoding(d_model, max_len=max_seq_len * 2, dropout=dropout)
+        self.blocks = nn.ModuleList(
+            [TiedTransformerBlock(d_model, nhead, dim_feedforward, dropout) for _ in range(num_layers)]
         )
-
-        # --- SGL gating ---
-        self.sgl = SGLGatingModule(d_model)
-
-        # --- Dynamic latent encoder ---
-        self.latent_enc = DynamicLatentEncoder(d_model)
-
-        # --- Deep encoder (refines the latent) ---
-        deep_layers = max(1, num_encoder_layers - self.shallow_layers)
-        self.deep_enc = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=d_model,
-                nhead=nhead,
-                dim_feedforward=dim_feedforward,
-                dropout=dropout,
-                batch_first=True,
-                norm_first=True,
-            ),
-            num_layers=deep_layers,
-            norm=nn.LayerNorm(d_model),
-        )
-
-        # --- Decoder ---
-        self.decoder = nn.TransformerDecoder(
-            nn.TransformerDecoderLayer(
-                d_model=d_model,
-                nhead=nhead,
-                dim_feedforward=dim_feedforward,
-                dropout=dropout,
-                batch_first=True,
-                norm_first=True,
-            ),
-            num_layers=num_decoder_layers,
-            norm=nn.LayerNorm(d_model),
-        )
-
-        # Output projection: latent → logits over byte vocabulary
-        self.output_proj = nn.Linear(d_model, vocab_size)
+        self.boundary_head = nn.Linear(d_model, 1)
 
         self._init_weights()
-
-    # ------------------------------------------------------------------
-    # Weight initialisation
-    # ------------------------------------------------------------------
 
     def _init_weights(self) -> None:
         for module in self.modules():
@@ -345,141 +99,109 @@ class FLUEDAutoencoder(nn.Module):
             elif isinstance(module, nn.Embedding):
                 nn.init.trunc_normal_(module.weight, std=0.02)
 
-    # ------------------------------------------------------------------
-    # Encode / decode interface
-    # ------------------------------------------------------------------
+    def _encode_hidden(self, src: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
+        h = self.pos(self.embedding(src))
+        for block in self.blocks:
+            h = block.forward_block(h, key_padding_mask=padding_mask)
+        return h
 
-    def encode(
+    def _boundary_scores(self, hidden: torch.Tensor) -> torch.Tensor:
+        delta = torch.zeros_like(hidden)
+        delta[:, 1:] = hidden[:, 1:] - hidden[:, :-1]
+        return self.boundary_head(delta).squeeze(-1)
+
+    @staticmethod
+    def _hard_spans(boundaries: torch.Tensor, valid_mask: torch.Tensor) -> Tuple[List[List[Tuple[int, int]]], torch.Tensor]:
+        # returns spans and span_id map [B,T]
+        bsz, seq_len = boundaries.shape
+        span_ids = torch.zeros_like(boundaries, dtype=torch.long)
+        all_spans: List[List[Tuple[int, int]]] = []
+        for b in range(bsz):
+            spans: List[Tuple[int, int]] = []
+            start = None
+            sid = -1
+            for t in range(seq_len):
+                if not valid_mask[b, t]:
+                    continue
+                if start is None:
+                    start = t
+                    sid += 1
+                elif boundaries[b, t]:
+                    spans.append((start, t))
+                    start = t
+                    sid += 1
+                span_ids[b, t] = sid
+            if start is not None:
+                last = int(valid_mask[b].sum().item())
+                spans.append((start, last))
+            all_spans.append(spans)
+        return all_spans, span_ids
+
+    def _compile_semantic_units(
         self,
-        src: torch.Tensor,
-        src_key_padding_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        """Encode a byte sequence to a latent representation.
+        hidden: torch.Tensor,
+        scores: torch.Tensor,
+        valid_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
+        probs = torch.sigmoid(scores)
+        hard = probs > self.boundary_threshold
+        hard[:, 0] = True
+        hard = hard & valid_mask
 
-        Args:
-            src:                  [B, T] long tensor of byte ids (0–255)
-            src_key_padding_mask: [B, T] bool (True = padding)
+        spans, span_ids = self._hard_spans(hard, valid_mask)
+        bsz, seq_len, dim = hidden.shape
+        num_units = [max(1, len(s)) for s in spans]
+        m_max = max(num_units)
+        z = hidden.new_zeros((bsz, m_max, dim))
 
-        Returns:
-            latent:    [B, T, d_model]
-            gate_info: dict with keys
-                         "gamma_compress", "gamma_expand", "gamma_bridge",
-                         "bridge_potential"
-        """
-        # 1. Embed + positional encoding
-        x = self.pos_enc(self.embedding(src))  # [B, T, d]
+        for b in range(bsz):
+            if not spans[b]:
+                continue
+            for sid, (start, end) in enumerate(spans[b]):
+                z[b, sid] = hidden[b, start:end].mean(dim=0)
 
-        # 2. Shallow encoder → hidden states + AttenRes
-        shallow_out, attenres = self.shallow_enc(x, src_key_padding_mask)
+        expanded = hidden.new_zeros((bsz, seq_len, dim))
+        for b in range(bsz):
+            for t in range(seq_len):
+                if valid_mask[b, t]:
+                    expanded[b, t] = z[b, span_ids[b, t]]
 
-        # 3. SGL gating
-        gamma_compress, gamma_expand, gamma_bridge, bridge_potential = self.sgl(
-            shallow_out, attenres
-        )
+        lengths = valid_mask.sum(dim=1).clamp(min=1)
+        m_over_n = torch.tensor(num_units, device=hidden.device, dtype=torch.float32) / lengths.float()
+        compression_loss = (m_over_n - self.target_compression).pow(2).mean()
 
-        # 4. Differentiable dynamic latent encoding
-        latent_raw = self.latent_enc(shallow_out, attenres, gamma_compress)
-
-        # 5. Deep encoder refinement
-        latent = self.deep_enc(latent_raw, src_key_padding_mask=src_key_padding_mask)
-
-        gate_info = {
-            "gamma_compress": gamma_compress,
-            "gamma_expand": gamma_expand,
-            "gamma_bridge": gamma_bridge,
-            "bridge_potential": bridge_potential,
+        metrics: Dict[str, Any] = {
+            "m_over_n": m_over_n,
+            "num_units": num_units,
+            "spans": spans,
+            "span_lengths": [[e - s for s, e in item] for item in spans],
+            "compression_loss": compression_loss,
         }
-        return latent, gate_info
+        return z, expanded, metrics
 
-    def decode(
-        self,
-        tgt: torch.Tensor,
-        memory: torch.Tensor,
-        tgt_mask: Optional[torch.Tensor] = None,
-        tgt_key_padding_mask: Optional[torch.Tensor] = None,
-        memory_key_padding_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Teacher-forced decode from encoder memory.
+    def _inverse_decode(self, expanded: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
+        x = expanded
+        for block in reversed(self.blocks):
+            x = block.inverse_block(x, key_padding_mask=padding_mask)
+        return x
 
-        Args:
-            tgt:    [B, T] long tensor of byte ids (teacher-forcing input)
-            memory: [B, T, d_model] encoder output
+    def forward(self, src: torch.Tensor, tgt: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        # Stage A strict reconstruction: tgt is intentionally ignored.
+        _ = tgt
+        padding_mask = src.eq(0)
+        valid_mask = ~padding_mask
 
-        Returns:
-            logits: [B, T, vocab_size]
-        """
-        tgt_emb = self.pos_enc(self.embedding(tgt))
-        dec_out = self.decoder(
-            tgt_emb,
-            memory,
-            tgt_mask=tgt_mask,
-            tgt_key_padding_mask=tgt_key_padding_mask,
-            memory_key_padding_mask=memory_key_padding_mask,
-        )
-        return self.output_proj(dec_out)
+        hidden = self._encode_hidden(src, padding_mask)
+        boundary_scores = self._boundary_scores(hidden)
+        z, expanded, metrics = self._compile_semantic_units(hidden, boundary_scores, valid_mask)
 
-    # ------------------------------------------------------------------
-    # Full forward pass
-    # ------------------------------------------------------------------
+        inv_hidden = self._inverse_decode(expanded, padding_mask)
+        logits = F.linear(inv_hidden, self.embedding.weight)
 
-    def forward(
-        self,
-        src: torch.Tensor,
-        tgt: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Full autoencoder forward (teacher-forced reconstruction).
-
-        Args:
-            src: [B, T] input byte ids
-            tgt: [B, T] target byte ids for teacher forcing;
-                 if None, uses src (same-sequence reconstruction).
-
-        Returns:
-            logits:   [B, T, vocab_size]
-            aux_loss: scalar — SGL gate entropy regularisation
-        """
-        if tgt is None:
-            tgt = src
-
-        T = src.size(1)
-        # Causal mask so the decoder cannot attend to future positions
-        tgt_mask = nn.Transformer.generate_square_subsequent_mask(T, device=src.device)
-
-        memory, gate_info = self.encode(src)
-        logits = self.decode(tgt, memory, tgt_mask=tgt_mask)
-        aux_loss = self._sgl_entropy_loss(
-            gate_info["gamma_compress"],
-            gate_info["gamma_expand"],
-            gate_info["gamma_bridge"],
-        )
-        return logits, aux_loss
-
-    # ------------------------------------------------------------------
-    # Auxiliary losses
-    # ------------------------------------------------------------------
-
-    def _sgl_entropy_loss(self, *gates: torch.Tensor) -> torch.Tensor:
-        """Binary-entropy regularisation to prevent gate collapse.
-
-        Maximises the entropy of each gate distribution so gates
-        do not trivially saturate at 0 or 1.
-
-        L_sgl = -Σ_k [ γ_k·log(γ_k) + (1−γ_k)·log(1−γ_k) ]
-        """
-        eps = 1e-6
-        loss = torch.zeros(1, device=gates[0].device)
-        for g in gates:
-            entropy = -(
-                g * (g + eps).log() + (1.0 - g) * (1.0 - g + eps).log()
-            )
-            # Minimise negative entropy → maximise entropy
-            loss = loss - entropy.mean()
-        return self.gate_entropy_weight * loss.squeeze()
-
-    # ------------------------------------------------------------------
-    # Utilities
-    # ------------------------------------------------------------------
+        metrics["boundary_scores"] = boundary_scores
+        metrics["num_units_tensor"] = torch.tensor(metrics["num_units"], device=src.device)
+        metrics["z"] = z
+        return logits, metrics
 
     def count_parameters(self) -> int:
-        """Return the total number of trainable parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
