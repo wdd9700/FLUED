@@ -180,7 +180,7 @@ class Trainer:
         elif train_cfg.amp_dtype == "fp16":
             self.amp_dtype = torch.float16
         else:
-            raise ValueError(f"Unsupported amp_dtype: {train_cfg.amp_dtype}")
+            raise ValueError(f"Unsupported amp_dtype: {train_cfg.amp_dtype}. Expected 'bf16' or 'fp16'.")
         self.autocast_ctx = (lambda: torch.autocast(device_type="cuda", dtype=self.amp_dtype, enabled=amp_enabled))
         self.scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled and self.amp_dtype == torch.float16)
 

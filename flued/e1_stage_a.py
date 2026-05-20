@@ -99,7 +99,10 @@ def main() -> int:
 
     metrics = eval_step(trainer.model, eval_loader, device, max_batches=20)
     recon_acc = metrics["reconstruction_accuracy"]
-    m_over_n = metrics["m_over_n"]
+    m_over_n = metrics.get("m_over_n")
+    if m_over_n is None:
+        print("FAIL: E1 criteria unavailable because model did not produce m_over_n.")
+        return 1
     logger.info("Final E1 metrics: recon_acc=%.4f m_over_n=%.4f", recon_acc, m_over_n)
 
     passed = (

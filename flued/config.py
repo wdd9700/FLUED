@@ -124,6 +124,8 @@ def parse_args() -> Tuple[ModelConfig, TrainConfig]:
     parser.add_argument("--num-workers", type=int, default=0)
 
     args = parser.parse_args()
+    if args.grad_accum_steps < 1:
+        parser.error("--grad-accum-steps must be >= 1")
 
     model_cfg = ModelConfig(
         model_type=args.model_type,
@@ -151,7 +153,7 @@ def parse_args() -> Tuple[ModelConfig, TrainConfig]:
         weight_decay=args.weight_decay,
         warmup_steps=args.warmup_steps,
         grad_clip=args.grad_clip,
-        grad_accum_steps=max(1, args.grad_accum_steps),
+        grad_accum_steps=args.grad_accum_steps,
         amp=args.amp,
         amp_dtype=args.amp_dtype,
         log_interval=args.log_interval,

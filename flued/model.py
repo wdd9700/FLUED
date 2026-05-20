@@ -46,14 +46,16 @@ class TiedTransformerBlock(nn.Module):
         self.drop = nn.Dropout(dropout)
 
     def forward_block(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        y, _ = self.self_attn(self.ln1(x), self.ln1(x), self.ln1(x), key_padding_mask=key_padding_mask, need_weights=False)
+        x_norm = self.ln1(x)
+        y, _ = self.self_attn(x_norm, x_norm, x_norm, key_padding_mask=key_padding_mask, need_weights=False)
         x = x + self.drop(y)
         x = x + self.drop(self.ffn(self.ln2(x)))
         return x
 
     def inverse_block(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         # Approximate inverse using the same tied parameters.
-        y, _ = self.self_attn(self.ln1(x), self.ln1(x), self.ln1(x), key_padding_mask=key_padding_mask, need_weights=False)
+        x_norm = self.ln1(x)
+        y, _ = self.self_attn(x_norm, x_norm, x_norm, key_padding_mask=key_padding_mask, need_weights=False)
         x = x - self.drop(y)
         x = x - self.drop(self.ffn(self.ln2(x)))
         return x
