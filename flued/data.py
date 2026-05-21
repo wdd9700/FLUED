@@ -264,71 +264,6 @@ def get_dataloader(
     )
 
 
-# ---------------------------------------------------------------------------
-# v0.4 additions: ByteReconstructionDataset and safe_train_eval_split
-# ---------------------------------------------------------------------------
-
-# PAD=0, byte b (0-255) -> token id b+1 (1-256).  Matches flued.model.PAD_ID.
-_BYTE_OFFSET: int = 1
-
-
-class ByteReconstructionDataset(Dataset):
-    """Dataset for strict byte reconstruction (src == tgt) with PAD-offset encoding.
-
-    Used by E1 Stage A: the model must reconstruct the exact input sequence.
-
-    Token encoding:
-        PAD = 0
-        byte b (0-255) -> token id  b + 1   (i.e. 1-256)
-
-    Each sample is a pair (src, tgt) where src == tgt - the model is not
-    doing next-token prediction; it is autoencoding.
-    """
-
-    def __init__(
-        self,
-        texts: Optional[List[str]] = None,
-        file_path: Optional[str] = None,
-        seq_len: int = 128,
-        stride: int = 64,
-    ) -> None:
-        self.seq_len = seq_len
-
-        if texts is None and file_path is None:
-            texts = STUB_CORPUS * 50
-        elif file_path is not None:
-            with open(file_path, encoding="utf-8") as fh:
-                texts = fh.readlines()
-
-        # Concatenate texts -> single byte stream with PAD-offset encoding
-        all_ids: List[int] = []
-        for t in texts:  # type: ignore[union-attr]
-            all_ids.extend(b + _BYTE_OFFSET for b in t.rstrip("\n").encode("utf-8"))
-            all_ids.append(10 + _BYTE_OFFSET)  # newline separator, also offset
-
-        self.data: torch.Tensor = torch.tensor(all_ids, dtype=torch.long)
-
-        self.chunks: List[torch.Tensor] = []
-        for start in range(0, len(self.data) - seq_len + 1, stride):
-            self.chunks.append(self.data[start : start + seq_len])
-
-        if not self.chunks and len(self.data) > 0:
-            # Fallback: single padded chunk so tiny corpora don't crash
-            chunk = self.data[: seq_len]
-            if len(chunk) < seq_len:
-                pad = torch.zeros(seq_len - len(chunk), dtype=torch.long)
-                chunk = torch.cat([chunk, pad])
-            self.chunks.append(chunk)
-
-    def __len__(self) -> int:
-        return len(self.chunks)
-
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Return (src, tgt) where src == tgt (strict reconstruction)."""
-        chunk = self.chunks[idx]
-        return chunk, chunk
-
-
 def safe_train_eval_split(
     dataset: Dataset,
     eval_fraction: float = 0.1,
@@ -349,28 +284,4 @@ def safe_train_eval_split(
         [n_train, n_eval],
         generator=torch.Generator().manual_seed(seed),
     )
-
-
-# ---------------------------------------------------------------------------
-# Dynamic span utilities (used by FLUED encoder at inference / analysis time)
-# ---------------------------------------------------------------------------
-
-
-def tiny_chinese_logic_samples() -> Dict[str, List[ClozeItem]]:
-    """Tiny built-in smoke data for E2 few-shot style tasks."""
-    return {
-        "idiom_cloze": [
-            ClozeItem("他学习很努力，成绩___。", ["一落千丈", "蒸蒸日上"], 1),
-            ClozeItem("这次准备不足，结果___。", ["马到成功", "一败涂地"], 1),
-        ],
-        "connective": [
-            ClozeItem("虽然下雨了，___我们还是出发了。", ["但是", "因为"], 0),
-            ClozeItem("他迟到了，___路上堵车。", ["所以", "因为"], 1),
-        ],
-        "coref_cloze": [
-            ClozeItem("小王告诉小李，___明天会到。", ["他", "她"], 0),
-            ClozeItem("小红看见小张后，对___挥手。", ["她", "他"], 1),
-        ],
-    }
-
 

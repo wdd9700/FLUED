@@ -100,7 +100,7 @@ PRESETS: Dict[str, Dict] = {
         "d_model": 1024,
         "nhead": 16,
         "dim_feedforward": 4096,
-        "num_layers": 12,
+        "num_layers": 24,
         "max_seq_len": 512,
         "dropout": 0.0,
         "batch_size": 4,
@@ -222,8 +222,16 @@ def run_e1(args: argparse.Namespace) -> bool:
     model.train()
     train_iter = iter(train_loader)
     running_loss = 0.0
+    running_recon_loss = 0.0
+    running_comp_loss = 0.0
     running_acc = 0.0
     running_mon = 0.0
+    running_soft_mon = 0.0
+    running_hard_mon = 0.0
+    running_num_units = 0.0
+    running_bp_mean = 0.0
+    running_bp_std = 0.0
+    running_grad_norm = 0.0
 
     global_step = 0
     accum_steps = 0
@@ -253,8 +261,16 @@ def run_e1(args: argparse.Namespace) -> bool:
 
         accum_steps += 1
         running_loss += (recon_loss + comp_loss).item()
+        running_recon_loss += recon_loss.item()
+        running_comp_loss += comp_loss.item()
         running_acc += reconstruction_accuracy(logits.detach(), src)
         running_mon += metrics["m_over_n"]
+        running_soft_mon += metrics["soft_m_over_n"].item()
+        running_hard_mon += float(metrics["hard_m_over_n"])
+        running_num_units += float(metrics["num_units"])
+        _bp = metrics["boundary_probs"].detach()
+        running_bp_mean += _bp.mean().item()
+        running_bp_std += _bp.std().item()
 
         if accum_steps < args.grad_accum_steps:
             continue
@@ -269,21 +285,36 @@ def run_e1(args: argparse.Namespace) -> bool:
         else:
             optimizer.step()
         scheduler.step()
+        # Capture boundary_head grad_norm before zeroing (P0 gate metric)
+        if model.boundary_head.weight.grad is not None:
+            running_grad_norm += model.boundary_head.weight.grad.norm().item()
         optimizer.zero_grad()
         accum_steps = 0
         global_step += 1
 
         if global_step % 50 == 0:
-            log_n = 50 * args.grad_accum_steps
+            log_n = 50 * args.grad_accum_steps  # micro-step count
+            log_g = 50  # gradient-step count
             logger.info(
-                "step=%5d  loss=%.4f  recon_acc=%.4f  m/n=%.3f  lr=%.2e",
+                "step=%5d  loss=%.4f  recon=%.4f  comp=%.4f  recon_acc=%.4f"
+                "  soft_m/n=%.3f  hard_m/n=%.3f  units=%.1f"
+                "  bp_mean=%.3f  bp_std=%.3f  bhead_gnorm=%.4f  lr=%.2e",
                 global_step,
                 running_loss / log_n,
+                running_recon_loss / log_n,
+                running_comp_loss / log_n,
                 running_acc / log_n,
-                running_mon / log_n,
+                running_soft_mon / log_n,
+                running_hard_mon / log_n,
+                running_num_units / log_n,
+                running_bp_mean / log_n,
+                running_bp_std / log_n,
+                running_grad_norm / log_g,
                 scheduler.get_last_lr()[0],
             )
-            running_loss = running_acc = running_mon = 0.0
+            running_loss = running_recon_loss = running_comp_loss = 0.0
+            running_acc = running_mon = running_soft_mon = running_hard_mon = 0.0
+            running_num_units = running_bp_mean = running_bp_std = running_grad_norm = 0.0
 
     # --- Evaluation ---
     model.eval()

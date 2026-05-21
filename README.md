@@ -60,6 +60,23 @@ Optional (only for selected E2 baselines):
 pip install sentencepiece tiktoken
 ```
 
+## E1 pass criteria
+
+> **smoke pass ≠ research pass**
+>
+> `python -m flued.e1_stage_a --preset smoke_cpu` passing only confirms the code pipeline runs end-to-end.
+> A research-grade E1 pass requires **all** of the following:
+>
+> | Metric | Target |
+> |--------|--------|
+> | `recon_acc` | ≥ 0.99 |
+> | `hard_m_over_n` | ∈ [0.125, 0.5] |
+> | `boundary_head.grad.norm()` | > 0 (every step) |
+>
+> Stage A (`e1_stage_a.py`) is the reconstruction-only experiment.
+> Stage B (generative backbone) is **not yet implemented**.
+> E2 comparison (`e2_compare.py`) is a scaffold — it requires trained checkpoints to produce meaningful results.
+
 ## E1 commands
 
 CPU smoke:

@@ -151,6 +151,7 @@ def eval_step(model: nn.Module, dataloader: DataLoader, device: torch.device, ma
         aux = result[1]
         if isinstance(aux, dict):
             aux_loss = aux.get("compression_loss", torch.tensor(0.0, device=device))
+            total_m_over_n += aux.get("m_over_n", 0.0)
         else:
             aux_loss = aux
         loss = criterion(logits.view(-1, logits.size(-1)), tgt.view(-1)) + aux_loss
