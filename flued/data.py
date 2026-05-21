@@ -1,4 +1,4 @@
-"""Data utilities for FLUED v0.4 local experiments."""
+"""Data utilities for FLUED v0.4 local experiments.
 
 Provides:
   - UTF-8 byte / Unicode codepoint encoding utilities
@@ -268,7 +268,7 @@ def get_dataloader(
 # v0.4 additions: ByteReconstructionDataset and safe_train_eval_split
 # ---------------------------------------------------------------------------
 
-# PAD=0, byte b (0–255) → token id b+1 (1–256).  Matches flued.model.PAD_ID.
+# PAD=0, byte b (0-255) -> token id b+1 (1-256).  Matches flued.model.PAD_ID.
 _BYTE_OFFSET: int = 1
 
 
@@ -279,9 +279,9 @@ class ByteReconstructionDataset(Dataset):
 
     Token encoding:
         PAD = 0
-        byte b (0–255) → token id  b + 1   (i.e. 1–256)
+        byte b (0-255) -> token id  b + 1   (i.e. 1-256)
 
-    Each sample is a pair (src, tgt) where src == tgt — the model is not
+    Each sample is a pair (src, tgt) where src == tgt - the model is not
     doing next-token prediction; it is autoencoding.
     """
 
@@ -300,7 +300,7 @@ class ByteReconstructionDataset(Dataset):
             with open(file_path, encoding="utf-8") as fh:
                 texts = fh.readlines()
 
-        # Concatenate texts → single byte stream with PAD-offset encoding
+        # Concatenate texts -> single byte stream with PAD-offset encoding
         all_ids: List[int] = []
         for t in texts:  # type: ignore[union-attr]
             all_ids.extend(b + _BYTE_OFFSET for b in t.rstrip("\n").encode("utf-8"))
@@ -372,3 +372,5 @@ def tiny_chinese_logic_samples() -> Dict[str, List[ClozeItem]]:
             ClozeItem("小红看见小张后，对___挥手。", ["她", "他"], 1),
         ],
     }
+
+
