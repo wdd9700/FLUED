@@ -508,3 +508,68 @@ class TestParameterCounts300M:
             f"{model_type} 300M has {n:,} parameters, "
             f"expected {low:,}-{high:,} (+-20% of 300M)"
         )
+
+
+# ---------------------------------------------------------------------------
+# CLI --help smoke tests  (W3)
+# ---------------------------------------------------------------------------
+
+import subprocess
+import sys as _sys
+
+
+class TestCLIHelp:
+    """All module entry-points must handle --help and exit 0 (W3)."""
+
+    def test_e1_stage_a_help(self):
+        result = subprocess.run(
+            [_sys.executable, "-m", "flued.e1_stage_a", "--help"],
+            capture_output=True,
+        )
+        assert result.returncode == 0, (
+            f"e1_stage_a --help returned {result.returncode}:\n"
+            f"{result.stderr.decode()}"
+        )
+
+    def test_e2_compare_help(self):
+        result = subprocess.run(
+            [_sys.executable, "-m", "flued.e2_compare", "--help"],
+            capture_output=True,
+        )
+        assert result.returncode == 0, (
+            f"e2_compare --help returned {result.returncode}:\n"
+            f"{result.stderr.decode()}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Optional-dependency graceful-skip tests  (W4)
+# ---------------------------------------------------------------------------
+
+
+class TestOptionalDepsGracefulSkip:
+    """Adapter functions must return (None, None, None, str) when dep is missing (W4)."""
+
+    def test_sentencepiece_missing(self, monkeypatch):
+        """_make_sentencepiece_adapter must gracefully skip if sentencepiece is absent."""
+        monkeypatch.setitem(_sys.modules, "sentencepiece", None)
+        from flued.e2_compare import _make_sentencepiece_adapter
+        model, encode_fn, vocab_size, error_msg = _make_sentencepiece_adapter(
+            256, 64, 128, 2, 32, 0.0, [], torch.device("cpu"),
+        )
+        assert model is None, "Expected model=None when sentencepiece missing"
+        assert isinstance(error_msg, str) and len(error_msg) > 0, (
+            "Expected non-empty error_msg when sentencepiece missing"
+        )
+
+    def test_tiktoken_missing(self, monkeypatch):
+        """_make_tiktoken_adapter must gracefully skip if tiktoken is absent."""
+        monkeypatch.setitem(_sys.modules, "tiktoken", None)
+        from flued.e2_compare import _make_tiktoken_adapter
+        model, encode_fn, vocab_size, error_msg = _make_tiktoken_adapter(
+            64, 4, 128, 2, 32, 0.0, torch.device("cpu"),
+        )
+        assert model is None, "Expected model=None when tiktoken missing"
+        assert isinstance(error_msg, str) and len(error_msg) > 0, (
+            "Expected non-empty error_msg when tiktoken missing"
+        )

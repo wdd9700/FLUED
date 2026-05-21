@@ -119,11 +119,16 @@ class TiedTransformerBlock(nn.Module):
         h = h + self._ffn(self.norm2(h))
         return h
 
-    def inverse_block(self, x: torch.Tensor) -> torch.Tensor:
+    def inverse_block(
+        self,
+        x: torch.Tensor,
+        key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """DSC⁻¹ inverse (approximate): decode step."""
         h = x - self._ffn(self.norm2(x))
         n1 = self.norm1(h)
-        h = h - self.attn(n1, n1, n1, need_weights=False)[0]
+        h = h - self.attn(n1, n1, n1, key_padding_mask=key_padding_mask,
+                          need_weights=False)[0]
         return h
 
 
@@ -319,6 +324,8 @@ class FLUEDAutoencoder(nn.Module):
         """
         B, T, d = hidden.shape
         boundary_probs = torch.sigmoid(boundary_scores)  # [B, T]
+        boundary_probs = boundary_probs.clone()
+        boundary_probs[:, 0] = 1.0  # first token is always a boundary (soft/hard aligned)
 
         # ---- soft path ----
         soft_A = self._soft_assignment(boundary_probs)          # [B, T, T]
@@ -405,7 +412,11 @@ class FLUEDAutoencoder(nn.Module):
 
         return self._compile_semantic_units(h, boundary_scores, src_key_padding_mask)
 
-    def decode(self, z_expanded: torch.Tensor) -> torch.Tensor:
+    def decode(
+        self,
+        z_expanded: torch.Tensor,
+        src_key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Inverse decode (DSC⁻¹): soft-expanded latent → byte logits.
 
         Uses tied weights in reverse order with approximate inverse blocks.
@@ -415,7 +426,7 @@ class FLUEDAutoencoder(nn.Module):
         """
         x = z_expanded
         for block in reversed(self.blocks):
-            x = block.inverse_block(x)
+            x = block.inverse_block(x, key_padding_mask=src_key_padding_mask)
         return F.linear(x, self.embedding.weight)  # tied output projection
 
     def forward(
@@ -435,7 +446,7 @@ class FLUEDAutoencoder(nn.Module):
         """
         src_key_padding_mask = src == PAD_ID
         expanded_soft, metrics = self.encode(src, src_key_padding_mask)
-        logits = self.decode(expanded_soft)
+        logits = self.decode(expanded_soft, src_key_padding_mask)
         return logits, metrics
 
     # ------------------------------------------------------------------
