@@ -26,6 +26,8 @@ Key design decisions
 * Compression loss: soft boundary density (differentiable) not hard m/n.
 """
 
+from __future__ import annotations
+
 import math
 from typing import Dict, List, Optional, Tuple
 
@@ -47,11 +49,6 @@ def id_to_byte(token_id: int) -> int:
     return token_id - 1
 
 
-# ---------------------------------------------------------------------------
-# Shared sub-modules
-# ---------------------------------------------------------------------------
-
-
 class PositionalEncoding(nn.Module):
     """Standard sinusoidal positional encoding (Vaswani et al., 2017)."""
 
@@ -60,18 +57,13 @@ class PositionalEncoding(nn.Module):
         self.dropout = nn.Dropout(dropout)
         pe = torch.zeros(max_len, d_model)
         pos = torch.arange(max_len, dtype=torch.float).unsqueeze(1)
-        div = torch.exp(
-            torch.arange(0, d_model, 2, dtype=torch.float)
-            * (-math.log(10000.0) / d_model)
-        )
+        div = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(pos * div)
         pe[:, 1::2] = torch.cos(pos * div)
         self.register_buffer("pe", pe.unsqueeze(0))  # [1, max_len, d_model]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: [B, T, d_model]"""
-        x = x + self.pe[:, : x.size(1)]  # type: ignore[index]
-        return self.dropout(x)
+        return self.dropout(x + self.pe[:, : x.size(1)])
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +148,7 @@ class FLUEDAutoencoder(nn.Module):
         self,
         vocab_size: int = VOCAB_SIZE,
         d_model: int = 256,
-        nhead: int = 4,
+        nhead: int = 8,
         dim_feedforward: int = 1024,
         num_layers: int = 4,
         max_seq_len: int = 512,
@@ -201,10 +193,6 @@ class FLUEDAutoencoder(nn.Module):
         self.boundary_head = nn.Linear(d_model, 1)
 
         self._init_weights()
-
-    # ------------------------------------------------------------------
-    # Weight initialisation
-    # ------------------------------------------------------------------
 
     def _init_weights(self) -> None:
         for module in self.modules():
@@ -391,7 +379,39 @@ class FLUEDAutoencoder(nn.Module):
     # Encode / decode interface
     # ------------------------------------------------------------------
 
-    def encode(
+    def _boundary_scores(self, hidden: torch.Tensor) -> torch.Tensor:
+        delta = torch.zeros_like(hidden)
+        delta[:, 1:] = hidden[:, 1:] - hidden[:, :-1]
+        return self.boundary_head(delta).squeeze(-1)
+
+    @staticmethod
+    def _hard_spans(boundaries: torch.Tensor, valid_mask: torch.Tensor) -> Tuple[List[List[Tuple[int, int]]], torch.Tensor]:
+        # returns spans and span_id map [B,T]
+        bsz, seq_len = boundaries.shape
+        span_ids = torch.zeros_like(boundaries, dtype=torch.long)
+        all_spans: List[List[Tuple[int, int]]] = []
+        for b in range(bsz):
+            spans: List[Tuple[int, int]] = []
+            start = None
+            sid = -1
+            for t in range(seq_len):
+                if not valid_mask[b, t]:
+                    continue
+                if start is None:
+                    start = t
+                    sid += 1
+                elif boundaries[b, t]:
+                    spans.append((start, t))
+                    start = t
+                    sid += 1
+                span_ids[b, t] = sid
+            if start is not None:
+                last = int(valid_mask[b].sum().item())
+                spans.append((start, last))
+            all_spans.append(spans)
+        return all_spans, span_ids
+
+    def _compile_semantic_units(
         self,
         src: torch.Tensor,
         src_key_padding_mask: Optional[torch.Tensor] = None,
@@ -430,9 +450,8 @@ class FLUEDAutoencoder(nn.Module):
             x = block.inverse_block(x)
         return F.linear(x, self.embedding.weight)  # tied output projection
 
-    # ------------------------------------------------------------------
-    # Full forward pass
-    # ------------------------------------------------------------------
+        inv_hidden = self._inverse_decode(expanded, padding_mask)
+        logits = F.linear(inv_hidden, self.embedding.weight)
 
     def forward(
         self,
@@ -459,7 +478,6 @@ class FLUEDAutoencoder(nn.Module):
     # ------------------------------------------------------------------
 
     def count_parameters(self) -> int:
-        """Return the total number of trainable parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
