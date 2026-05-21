@@ -225,7 +225,6 @@ def run_e1(args: argparse.Namespace) -> bool:
     running_recon_loss = 0.0
     running_comp_loss = 0.0
     running_acc = 0.0
-    running_mon = 0.0
     running_soft_mon = 0.0
     running_hard_mon = 0.0
     running_num_units = 0.0
@@ -264,7 +263,6 @@ def run_e1(args: argparse.Namespace) -> bool:
         running_recon_loss += recon_loss.item()
         running_comp_loss += comp_loss.item()
         running_acc += reconstruction_accuracy(logits.detach(), src)
-        running_mon += metrics["m_over_n"]
         running_soft_mon += metrics["soft_m_over_n"].item()
         running_hard_mon += float(metrics["hard_m_over_n"])
         running_num_units += float(metrics["num_units"])
@@ -313,7 +311,7 @@ def run_e1(args: argparse.Namespace) -> bool:
                 scheduler.get_last_lr()[0],
             )
             running_loss = running_recon_loss = running_comp_loss = 0.0
-            running_acc = running_mon = running_soft_mon = running_hard_mon = 0.0
+            running_acc = running_soft_mon = running_hard_mon = 0.0
             running_num_units = running_bp_mean = running_bp_std = running_grad_norm = 0.0
 
     # --- Evaluation ---

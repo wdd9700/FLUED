@@ -180,6 +180,7 @@ def compute_cloze_accuracy(
     vocab_size: int,
     device: torch.device,
     max_seq_len: int = 32,
+    byte_level: bool = True,
 ) -> float:
     """Compute reconstruction-based cloze accuracy.
 
@@ -187,8 +188,24 @@ def compute_cloze_accuracy(
     autoencoder, and checks whether the highest-probability prediction at
     the last byte position of `prefix` matches the first byte of `target`.
 
+    .. warning::
+        **BYTE-LEVEL MODELS ONLY** (FLUED, BLT).
+        This metric is *not comparable* across model types.
+        For sentencepiece / tiktoken, token boundaries do not align with byte
+        positions, so the prefix-end byte position has no meaningful
+        relationship to the first token of `target` in those vocabularies.
+        Pass ``byte_level=False`` to suppress computation and get ``nan``.
+
     This is a byte-level reconstruction approximation, not exact cloze scoring.
     """
+    if not byte_level:
+        logger.warning(
+            "compute_cloze_accuracy: skipped for non-byte-level model "
+            "(token boundaries don’t align with byte positions — "
+            "results would be an artifact, not a fair comparison)."
+        )
+        return float("nan")
+
     model.eval()
     correct = 0
     total = 0
@@ -508,8 +525,10 @@ def run_e2(args: argparse.Namespace) -> List[Dict]:
 
         # --- Evaluation ---
         ppl = compute_perplexity(model, eval_loader, vocab_size, device)
+        byte_level = model_name in ("flued", "blt")
         cloze = compute_cloze_accuracy(
-            model, cloze_samples, encode_fn, vocab_size, device, args.max_seq_len
+            model, cloze_samples, encode_fn, vocab_size, device, args.max_seq_len,
+            byte_level=byte_level,
         )
 
         m_over_n = None
@@ -525,12 +544,13 @@ def run_e2(args: argparse.Namespace) -> List[Dict]:
         row.update({
             "perplexity": round(ppl, 4),
             "m_over_n": round(m_over_n, 4) if m_over_n is not None else None,
-            "cloze_accuracy": round(cloze, 4),
+            "cloze_accuracy": None if math.isnan(cloze) else round(cloze, 4),
             "n_params": n_params,
         })
+        _cloze_str = "N/A (non-byte-level)" if math.isnan(cloze) else f"{cloze:.4f}"
         logger.info(
-            "  ppl=%.2f  cloze=%.4f  m/n=%s",
-            ppl, cloze, f"{m_over_n:.4f}" if m_over_n is not None else "N/A",
+            "  ppl=%.2f  cloze=%s  m/n=%s",
+            ppl, _cloze_str, f"{m_over_n:.4f}" if m_over_n is not None else "N/A",
         )
         results.append(row)
 
