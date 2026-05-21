@@ -17,6 +17,7 @@ from flued.config import ModelConfig, TrainConfig
 from flued.data import (
     STUB_CORPUS,
     BPETextDataset,
+    ByteReconstructionDataset,
     ByteTextDataset,
     SimpleBPE,
     get_dataloader,
@@ -192,7 +193,7 @@ class Trainer:
         else:
             raise ValueError(f"Unsupported amp_dtype: {train_cfg.amp_dtype}. Expected 'bf16' or 'fp16'.")
         self.autocast_ctx = (lambda: torch.autocast(device_type="cuda", dtype=self.amp_dtype, enabled=amp_enabled))
-        self.scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled and self.amp_dtype == torch.float16)
+        self.scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled and self.amp_dtype == torch.float16)
 
         os.makedirs(train_cfg.output_dir, exist_ok=True)
         self.global_step = 0
@@ -216,14 +217,18 @@ class Trainer:
                     train_iter = iter(self.train_loader)
                     src, tgt = next(train_iter)
 
-            self.optimizer.zero_grad()
-            result = self.model(src, tgt)
-            logits = result[0]
-            aux = result[1]
-            if isinstance(aux, dict):
-                aux_loss = aux.get("compression_loss", torch.tensor(0.0, device=self.device))
-            else:
-                aux_loss = aux
+                src, tgt = src.to(self.device), tgt.to(self.device)
+
+                with self.autocast_ctx():
+                    result = self.model(src, tgt)
+                    logits = result[0]
+                    aux = result[1]
+                    if isinstance(aux, dict):
+                        aux_loss = aux.get("compression_loss", torch.tensor(0.0, device=self.device))
+                    else:
+                        aux_loss = aux
+                    loss = self.criterion(logits.view(-1, logits.size(-1)), tgt.view(-1)) + aux_loss
+                    loss = loss / self.cfg.grad_accum_steps
 
                 self.scaler.scale(loss).backward()
                 step_loss += loss.item()

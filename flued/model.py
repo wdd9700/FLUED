@@ -379,39 +379,7 @@ class FLUEDAutoencoder(nn.Module):
     # Encode / decode interface
     # ------------------------------------------------------------------
 
-    def _boundary_scores(self, hidden: torch.Tensor) -> torch.Tensor:
-        delta = torch.zeros_like(hidden)
-        delta[:, 1:] = hidden[:, 1:] - hidden[:, :-1]
-        return self.boundary_head(delta).squeeze(-1)
-
-    @staticmethod
-    def _hard_spans(boundaries: torch.Tensor, valid_mask: torch.Tensor) -> Tuple[List[List[Tuple[int, int]]], torch.Tensor]:
-        # returns spans and span_id map [B,T]
-        bsz, seq_len = boundaries.shape
-        span_ids = torch.zeros_like(boundaries, dtype=torch.long)
-        all_spans: List[List[Tuple[int, int]]] = []
-        for b in range(bsz):
-            spans: List[Tuple[int, int]] = []
-            start = None
-            sid = -1
-            for t in range(seq_len):
-                if not valid_mask[b, t]:
-                    continue
-                if start is None:
-                    start = t
-                    sid += 1
-                elif boundaries[b, t]:
-                    spans.append((start, t))
-                    start = t
-                    sid += 1
-                span_ids[b, t] = sid
-            if start is not None:
-                last = int(valid_mask[b].sum().item())
-                spans.append((start, last))
-            all_spans.append(spans)
-        return all_spans, span_ids
-
-    def _compile_semantic_units(
+    def encode(
         self,
         src: torch.Tensor,
         src_key_padding_mask: Optional[torch.Tensor] = None,
@@ -449,9 +417,6 @@ class FLUEDAutoencoder(nn.Module):
         for block in reversed(self.blocks):
             x = block.inverse_block(x)
         return F.linear(x, self.embedding.weight)  # tied output projection
-
-        inv_hidden = self._inverse_decode(expanded, padding_mask)
-        logits = F.linear(inv_hidden, self.embedding.weight)
 
     def forward(
         self,
