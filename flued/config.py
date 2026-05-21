@@ -11,21 +11,30 @@ SIZE_CONFIGS: Dict[str, Dict[str, Any]] = {
     "smoke": {
         "d_model": 128,
         "nhead": 4,
-        "dim_feedforward": 256,
-        "num_layers": 2,
+        "dim_feedforward": 1024,
+        "num_encoder_layers": 4,
+        "num_decoder_layers": 4,
+        # FLUED v0.4 uses a single num_layers (tied enc+dec weights)
+        "num_layers": 4,
     },
     "small": {
         "d_model": 256,
         "nhead": 8,
-        "dim_feedforward": 1024,
-        "num_layers": 4,
+        "dim_feedforward": 2048,
+        "num_encoder_layers": 8,
+        "num_decoder_layers": 8,
+        "num_layers": 8,
     },
-    "300m": {
-        # practical on 16GB with grad accumulation and seq_len 256-512
-        "d_model": 896,
-        "nhead": 14,
-        "dim_feedforward": 3584,
-        "num_layers": 12,
+    "300M": {
+        # ~300M params — full Stage A experiment (fits in 16 GB VRAM with batch 8–16)
+        # BPE/BLT: 12 enc + 12 dec layers × ~12.6M each ≈ 302M
+        # FLUED v0.4: 24 tied layers × ~12.6M each ≈ 302M (shared enc/dec weights)
+        "d_model": 1024,
+        "nhead": 16,
+        "dim_feedforward": 4096,
+        "num_encoder_layers": 12,
+        "num_decoder_layers": 12,
+        "num_layers": 24,
     },
 }
 
@@ -38,16 +47,28 @@ class ModelConfig:
     d_model: int = 256
     nhead: int = 8
     dim_feedforward: int = 1024
-    num_layers: int = 4
-    dropout: float = 0.1
-    max_seq_len: int = 256
+    num_encoder_layers: int = 4
+    num_decoder_layers: int = 4
+    dropout: float = 0.0          # E1 default: 0.0 (tied inverse is dropout-sensitive)
+    max_seq_len: int = 512
 
-    # byte-level PAD offset: PAD=0, bytes map to 1..256
+    # Byte-level vocabulary — v0.4 PAD-offset encoding: PAD=0, byte b → b+1
     vocab_size: int = 257
 
-    # semantic unit controls
+    # ------- FLUED v0.4-specific -------
+    # num_layers is the single depth parameter (encoder and decoder share weights)
+    num_layers: int = 4
+    # Hard boundary threshold for span extraction (inference / metrics)
     boundary_threshold: float = 0.5
+    # Soft boundary density target (compression_loss drives boundary_head training)
     target_compression: float = 0.3
+    # Weight on the compression loss term
+    compression_weight: float = 0.1
+
+    # ------- Legacy FLUED fields (ignored by FLUEDAutoencoder v0.4) -------
+    shallow_layers: int = 2
+    bridge_decay: float = 0.1
+    gate_entropy_weight: float = 0.0
 
     # token baseline vocab (sentencepiece or simple bpe)
     token_vocab_size: int = 8192

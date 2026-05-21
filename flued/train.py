@@ -6,16 +6,22 @@ import logging
 import math
 import os
 import random
-from contextlib import nullcontext
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 
 from flued.config import ModelConfig, TrainConfig
-from flued.data import BPETextDataset, ByteReconstructionDataset, STUB_CORPUS, SimpleBPE, get_dataloader
+from flued.data import (
+    STUB_CORPUS,
+    BPETextDataset,
+    ByteTextDataset,
+    SimpleBPE,
+    get_dataloader,
+    safe_train_eval_split,
+)
 
 logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
@@ -48,6 +54,7 @@ def build_model(model_cfg: ModelConfig) -> nn.Module:
             dropout=model_cfg.dropout,
             boundary_threshold=model_cfg.boundary_threshold,
             target_compression=model_cfg.target_compression,
+            compression_weight=model_cfg.compression_weight,
         )
 
     elif model_cfg.model_type == "bpe":
@@ -138,11 +145,14 @@ def eval_step(model: nn.Module, dataloader: DataLoader, device: torch.device, ma
         if i >= max_batches:
             break
         src, tgt = src.to(device), tgt.to(device)
-        logits, metrics = model(src, tgt)
-        loss = criterion(logits.view(-1, logits.size(-1)), tgt.view(-1))
-        if isinstance(metrics, dict) and "compression_loss" in metrics:
-            loss = loss + metrics["compression_loss"]
-            total_m_over_n += float(metrics["m_over_n"].mean().item())
+        result = model(src, tgt)
+        logits = result[0]
+        aux = result[1]
+        if isinstance(aux, dict):
+            aux_loss = aux.get("compression_loss", torch.tensor(0.0, device=device))
+        else:
+            aux_loss = aux
+        loss = criterion(logits.view(-1, logits.size(-1)), tgt.view(-1)) + aux_loss
         total_loss += loss.item()
         total_acc += compute_reconstruction_accuracy(logits, tgt)
         n += 1
@@ -206,13 +216,14 @@ class Trainer:
                     train_iter = iter(self.train_loader)
                     src, tgt = next(train_iter)
 
-                src, tgt = src.to(self.device), tgt.to(self.device)
-                with self.autocast_ctx():
-                    logits, metrics = self.model(src, tgt)
-                    loss = self.criterion(logits.view(-1, logits.size(-1)), tgt.view(-1))
-                    if isinstance(metrics, dict) and "compression_loss" in metrics:
-                        loss = loss + metrics["compression_loss"]
-                    loss = loss / self.cfg.grad_accum_steps
+            self.optimizer.zero_grad()
+            result = self.model(src, tgt)
+            logits = result[0]
+            aux = result[1]
+            if isinstance(aux, dict):
+                aux_loss = aux.get("compression_loss", torch.tensor(0.0, device=self.device))
+            else:
+                aux_loss = aux
 
                 self.scaler.scale(loss).backward()
                 step_loss += loss.item()
@@ -281,9 +292,10 @@ def main() -> None:
     model = build_model(model_cfg)
     dataset, _ = build_dataset(model_cfg, train_cfg)
 
-    n_eval = max(1, len(dataset) // 10)
-    n_train = max(1, len(dataset) - n_eval)
-    train_ds, eval_ds = random_split(dataset, [n_train, n_eval], generator=torch.Generator().manual_seed(train_cfg.seed))
+    # 90 / 10 train / eval split (robust to tiny datasets)
+    train_ds, eval_ds = safe_train_eval_split(
+        dataset, eval_fraction=0.1, seed=train_cfg.seed
+    )
 
     train_loader = get_dataloader(train_ds, batch_size=train_cfg.batch_size, shuffle=True, num_workers=train_cfg.num_workers)
     eval_loader = get_dataloader(eval_ds, batch_size=train_cfg.batch_size, shuffle=False, num_workers=train_cfg.num_workers)

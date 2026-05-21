@@ -245,7 +245,7 @@ class BLTAutoencoder(nn.Module):
 
     def __init__(
         self,
-        vocab_size: int = 256,
+        vocab_size: int = 257,  # v0.4 PAD-offset: PAD=0, byte b -> b+1; range [1, 256]
         d_model: int = 256,
         nhead: int = 4,
         dim_feedforward: int = 1024,

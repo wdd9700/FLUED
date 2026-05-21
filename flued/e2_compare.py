@@ -1,371 +1,651 @@
-"""E2 local comparison runner: FLUED vs sentencepiece/tiktoken token baselines."""
+"""
+FLUED E2 Comparison Runner — dynamic semantic units vs. fixed tokenizers.
 
-from __future__ import annotations
+Goal
+----
+Compare FLUED's dynamic segmentation against external tokenizer baselines
+on perplexity and (optionally) cloze accuracy.
+
+    Models: flued | sentencepiece | tiktoken | blt
+
+Usage
+-----
+    # Quick smoke test (random-init eval, no training)
+    python -m flued.e2_compare --preset smoke --models flued,sentencepiece,tiktoken
+
+    # With optional deps missing, those models are skipped gracefully
+    python -m flued.e2_compare --models flued
+
+    # Train before eval
+    python -m flued.e2_compare \\
+        --models flued \\
+        --mode train_eval \\
+        --train-steps 1000 \\
+        --data-path corpus.txt
+
+    # Load checkpoint
+    python -m flued.e2_compare \\
+        --models flued \\
+        --checkpoint flued_ckpt.pt \\
+        --mode eval_only
+
+    # Save results
+    python -m flued.e2_compare --models flued,blt \\
+        --output-json e2_results.json \\
+        --output-csv  e2_results.csv
+
+Notes
+-----
+* sentencepiece uses hard_vocab_limit=False to handle small corpora safely (P1-3).
+* BLT uses vocab_size=257 (PAD-offset compatible with FLUED v0.4).
+* E2 cloze scoring uses next-token log-probability of the masked token given
+  the prefix — this is a reconstruction-based approximation, not conditional
+  sampling.
+"""
 
 import argparse
 import csv
-import importlib
 import json
 import logging
+import math
 import os
-import shutil
+import sys
 import tempfile
-from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
+import torch.optim as optim
+from torch.utils.data import DataLoader
 
-from bpe_baseline.model import BPETransformerAutoencoder
-from flued.config import ModelConfig
-from flued.data import (
-    BYTE_VOCAB_SIZE,
-    PAD_ID,
-    STUB_CORPUS,
-    ByteReconstructionDataset,
-    ClozeItem,
-    get_dataloader,
-    text_to_byte_ids,
-    tiny_chinese_logic_samples,
+logging.basicConfig(
+    format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO,
 )
-from flued.model import FLUEDAutoencoder
+logger = logging.getLogger("flued.e2")
 
-logger = logging.getLogger("flued.e2_compare")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# ---------------------------------------------------------------------------
+# Presets
+# ---------------------------------------------------------------------------
 
-
-E2_PRESETS = {
-    "smoke": dict(d_model=128, nhead=4, dim_feedforward=256, num_layers=2, seq_len=96, batch_size=2),
-    "small": dict(d_model=256, nhead=8, dim_feedforward=1024, num_layers=4, seq_len=256, batch_size=2),
-    "class300m_16gb": dict(d_model=896, nhead=14, dim_feedforward=3584, num_layers=12, seq_len=256, batch_size=1),
+PRESETS: Dict[str, Dict] = {
+    "smoke": {
+        "d_model": 64,
+        "nhead": 4,
+        "dim_feedforward": 128,
+        "num_layers": 2,
+        "max_seq_len": 32,
+        "dropout": 0.0,
+        "batch_size": 4,
+        "seq_len": 32,
+        "stride": 16,
+        "train_steps": 100,
+        "lr": 3e-4,
+        "sentencepiece_vocab_size": 256,
+        "blt_patch_size": 4,
+    },
+    "medium": {
+        "d_model": 256,
+        "nhead": 4,
+        "dim_feedforward": 1024,
+        "num_layers": 4,
+        "max_seq_len": 256,
+        "dropout": 0.0,
+        "batch_size": 16,
+        "seq_len": 128,
+        "stride": 64,
+        "train_steps": 2000,
+        "lr": 1e-4,
+        "sentencepiece_vocab_size": 8192,
+        "blt_patch_size": 4,
+    },
 }
 
+# ---------------------------------------------------------------------------
+# Tiny Chinese logic samples for cloze testing
+# ---------------------------------------------------------------------------
 
-class OptionalDependencyError(RuntimeError):
-    pass
+def tiny_chinese_logic_samples() -> List[Dict]:
+    """Return a small set of cloze-style test items.
 
-
-class BaseAdapter:
-    name: str = "base"
-
-    @property
-    def vocab_size(self) -> int:
-        raise NotImplementedError
-
-    def encode(self, text: str) -> List[int]:
-        raise NotImplementedError
-
-
-class ByteAdapter(BaseAdapter):
-    name = "flued-bytes"
-
-    @property
-    def vocab_size(self) -> int:
-        return BYTE_VOCAB_SIZE
-
-    def encode(self, text: str) -> List[int]:
-        return text_to_byte_ids(text)
-
-
-class SentencePieceAdapter(BaseAdapter):
-    name = "sentencepiece"
-
-    def __init__(self, vocab_size: int, texts: List[str], model_prefix: Optional[str] = None) -> None:
-        try:
-            self.spm = importlib.import_module("sentencepiece")
-        except ImportError as exc:
-            raise OptionalDependencyError(
-                "sentencepiece baseline selected but package is missing. Install with: pip install sentencepiece"
-            ) from exc
-
-        self._vocab_size = vocab_size
-        # If model_prefix points to an existing model, training corpus texts are ignored.
-        tmp_dir = tempfile.mkdtemp(prefix="flued_spm_")
-        self._tmp_dir: Optional[str] = tmp_dir if model_prefix is None else None
-        safe_prefix = model_prefix or os.path.join(tmp_dir, "spm")
-        self.model_file = f"{safe_prefix}.model"
-        if not os.path.exists(self.model_file):
-            input_path = os.path.join(tmp_dir, "corpus.txt")
-            with open(input_path, "w", encoding="utf-8") as fh:
-                for line in texts:
-                    fh.write(line + "\n")
-            self.spm.SentencePieceTrainer.Train(
-                input=input_path,
-                model_prefix=self.model_file[:-6],
-                vocab_size=vocab_size,
-                model_type="bpe",
-                bos_id=-1,
-                eos_id=-1,
-                pad_id=0,
-                unk_id=1,
-            )
-        self.processor = self.spm.SentencePieceProcessor(model_file=self.model_file)
-
-    def __del__(self) -> None:
-        if self._tmp_dir and os.path.isdir(self._tmp_dir):
-            shutil.rmtree(self._tmp_dir, ignore_errors=True)
-
-    @property
-    def vocab_size(self) -> int:
-        return int(self.processor.vocab_size())
-
-    def encode(self, text: str) -> List[int]:
-        return list(self.processor.encode(text, out_type=int))
+    Each item is:
+        prefix: str   — context before the masked token
+        target: str   — the correct completion (single token / word)
+        category: str — label for grouping results
+    """
+    return [
+        # Chengyu / semantic fill-in
+        {"prefix": "马到", "target": "成功", "category": "chengyu"},
+        {"prefix": "一石", "target": "二鸟", "category": "chengyu"},
+        {"prefix": "半途", "target": "而废", "category": "chengyu"},
+        # Connective prediction
+        {"prefix": "虽然天气不好，", "target": "但是", "category": "connective"},
+        {"prefix": "不仅如此，", "target": "而且", "category": "connective"},
+        # Anaphora
+        {"prefix": "小明喜欢足球，", "target": "他", "category": "anaphora"},
+        {"prefix": "这本书很有趣，", "target": "它", "category": "anaphora"},
+        # Simple English fill-in
+        {"prefix": "The quick brown fox ", "target": "jumps", "category": "english"},
+        {"prefix": "Language models predict the next ", "target": "token", "category": "english"},
+    ]
 
 
-class TikTokenAdapter(BaseAdapter):
-    name = "tiktoken"
+# ---------------------------------------------------------------------------
+# Perplexity computation (model-agnostic)
+# ---------------------------------------------------------------------------
 
-    def __init__(self, encoding_name: str = "cl100k_base") -> None:
-        try:
-            tiktoken = importlib.import_module("tiktoken")
-        except ImportError as exc:
-            raise OptionalDependencyError(
-                "tiktoken baseline selected but package is missing. Install with: pip install tiktoken"
-            ) from exc
-        self.encoding = tiktoken.get_encoding(encoding_name)
-
-    @property
-    def vocab_size(self) -> int:
-        return int(self.encoding.n_vocab)
-
-    def encode(self, text: str) -> List[int]:
-        return list(self.encoding.encode(text))
-
-
-class TokenIdReconstructionDataset(Dataset):
-    def __init__(self, tokenized: List[List[int]], seq_len: int, pad_id: int = 0) -> None:
-        stream: List[int] = []
-        for seq in tokenized:
-            stream.extend(seq)
-            stream.append(pad_id)
-        if not stream:
-            stream = [pad_id]
-
-        self.seq_len = seq_len
-        self.pad_id = pad_id
-        data = torch.tensor(stream, dtype=torch.long)
-        self.chunks: List[torch.Tensor] = []
-        stride = max(1, seq_len // 2)
-        for start in range(0, max(1, len(data) - seq_len + 1), stride):
-            chunk = data[start : start + seq_len]
-            if chunk.numel() < seq_len:
-                pad = torch.full((seq_len - chunk.numel(),), pad_id, dtype=torch.long)
-                chunk = torch.cat([chunk, pad], dim=0)
-            self.chunks.append(chunk)
-
-    def __len__(self) -> int:
-        return len(self.chunks)
-
-    def __getitem__(self, idx: int):
-        src = self.chunks[idx]
-        return src, src.clone()
-
-
-@dataclass
-class ResultRow:
-    model: str
-    status: str
-    perplexity: Optional[float]
-    m_over_n: Optional[float]
-    cloze_accuracy: Optional[float]
-    detail: str
-
-
-def build_e2_preset_config(preset: str = "smoke") -> dict:
-    if preset not in E2_PRESETS:
-        raise ValueError(f"Unknown preset: {preset}")
-    return dict(E2_PRESETS[preset])
-
-
-def build_adapter(model_name: str, vocab_size: int, texts: List[str], tiktoken_encoding: str) -> BaseAdapter:
-    if model_name == "flued":
-        return ByteAdapter()
-    if model_name == "sentencepiece":
-        return SentencePieceAdapter(vocab_size=vocab_size, texts=texts)
-    if model_name == "tiktoken":
-        return TikTokenAdapter(encoding_name=tiktoken_encoding)
-    raise ValueError(f"Unsupported model name: {model_name}")
-
-
-def build_model_for_adapter(model_name: str, cfg: dict, adapter: BaseAdapter) -> torch.nn.Module:
-    if model_name == "flued":
-        return FLUEDAutoencoder(
-            vocab_size=BYTE_VOCAB_SIZE,
-            d_model=cfg["d_model"],
-            nhead=cfg["nhead"],
-            dim_feedforward=cfg["dim_feedforward"],
-            num_layers=cfg["num_layers"],
-            max_seq_len=cfg["seq_len"],
-            dropout=0.0,
-        )
-    return BPETransformerAutoencoder(
-        vocab_size=adapter.vocab_size,
-        d_model=cfg["d_model"],
-        nhead=cfg["nhead"],
-        dim_feedforward=cfg["dim_feedforward"],
-        num_encoder_layers=cfg["num_layers"],
-        num_decoder_layers=cfg["num_layers"],
-        max_seq_len=cfg["seq_len"],
-        dropout=0.0,
-    )
-
-
-def build_dataset_for_adapter(model_name: str, adapter: BaseAdapter, texts: List[str], seq_len: int) -> Dataset:
-    if model_name == "flued":
-        return ByteReconstructionDataset(texts=texts, seq_len=seq_len)
-    tokenized = [adapter.encode(t) for t in texts]
-    return TokenIdReconstructionDataset(tokenized, seq_len=seq_len)
-
-
-def evaluate_perplexity(
-    model: torch.nn.Module, loader: DataLoader, device: torch.device, max_batches: int = 20
-) -> Tuple[float, Optional[float]]:
-    model.eval()
-    criterion = nn.CrossEntropyLoss(ignore_index=0)
-    total_loss = 0.0
-    total_mn = 0.0
-    count = 0
-
-    with torch.no_grad():
-        for i, (src, tgt) in enumerate(loader):
-            if i >= max_batches:
-                break
-            src, tgt = src.to(device), tgt.to(device)
-            logits, metrics = model(src, tgt)
-            loss = criterion(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1))
-            total_loss += float(loss.item())
-            if isinstance(metrics, dict) and "m_over_n" in metrics:
-                total_mn += float(metrics["m_over_n"].mean().item())
-            count += 1
-
-    if count == 0:
-        return float("inf"), None
-    avg_loss = total_loss / count
-    ppl = float(torch.exp(torch.tensor(avg_loss)).item())
-    avg_mn = (total_mn / count) if total_mn else None
-    return ppl, avg_mn
-
-
-def score_cloze(model: torch.nn.Module, adapter: BaseAdapter, item: ClozeItem, device: torch.device) -> int:
-    criterion = nn.CrossEntropyLoss(ignore_index=0, reduction="sum")
-    losses: List[float] = []
-    model.eval()
-    for option in item.options:
-        text = item.text.replace("___", option)
-        ids = adapter.encode(text)
-        if not ids:
-            losses.append(float("inf"))
-            continue
-        x = torch.tensor([ids], dtype=torch.long, device=device)
-        with torch.no_grad():
-            logits, _ = model(x, x)
-            loss = criterion(logits.view(-1, logits.size(-1)), x.view(-1))
-        losses.append(float(loss.item()))
-    return int(min(range(len(losses)), key=lambda i: losses[i]))
-
-
-def evaluate_logic_tasks(
-    model: torch.nn.Module, adapter: BaseAdapter, task_items: Dict[str, List[ClozeItem]], device: torch.device
+@torch.no_grad()
+def compute_perplexity(
+    model: nn.Module,
+    loader: DataLoader,
+    vocab_size: int,
+    device: torch.device,
+    max_batches: int = 20,
 ) -> float:
-    total = 0
+    """Compute per-token cross-entropy perplexity.
+
+    Works for any model that accepts (src,) or (src, tgt) and returns
+    (logits, _) where logits is [B, T, V].
+    """
+    model.eval()
+    criterion = nn.CrossEntropyLoss(ignore_index=0, reduction="sum")
+    total_loss = 0.0
+    total_tokens = 0
+
+    for i, batch in enumerate(loader):
+        if i >= max_batches:
+            break
+        src = batch[0].to(device) if isinstance(batch, (list, tuple)) else batch.to(device)
+        result = model(src)
+        logits = result[0]
+        loss = criterion(logits.view(-1, logits.size(-1)), src.view(-1))
+        total_loss += loss.item()
+        total_tokens += (src != 0).sum().item()
+
+    if total_tokens == 0:
+        return float("inf")
+    return math.exp(min(total_loss / total_tokens, 20))  # clip to avoid overflow
+
+
+# ---------------------------------------------------------------------------
+# Cloze accuracy (prefix → target, reconstruction-based approximation)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def compute_cloze_accuracy(
+    model: nn.Module,
+    samples: List[Dict],
+    encode_fn,
+    vocab_size: int,
+    device: torch.device,
+    max_seq_len: int = 32,
+) -> float:
+    """Compute reconstruction-based cloze accuracy.
+
+    For each sample, encodes `prefix + target` as a byte sequence, runs the
+    autoencoder, and checks whether the highest-probability prediction at
+    the last byte position of `prefix` matches the first byte of `target`.
+
+    This is a byte-level reconstruction approximation, not exact cloze scoring.
+    """
+    model.eval()
     correct = 0
-    for items in task_items.values():
-        for item in items:
-            pred = score_cloze(model, adapter, item, device)
-            correct += int(pred == item.answer)
-            total += 1
-    return (correct / total) if total else 0.0
+    total = 0
+
+    for sample in samples:
+        prefix_bytes = list((sample["prefix"]).encode("utf-8"))
+        target_bytes = list((sample["target"]).encode("utf-8"))
+        full_bytes = (prefix_bytes + target_bytes)[:max_seq_len]
+        if not full_bytes:
+            continue
+
+        ids = encode_fn(full_bytes)
+        src = torch.tensor(ids, dtype=torch.long, device=device).unsqueeze(0)
+
+        result = model(src)
+        logits = result[0]  # [1, T, V]
+
+        pos = len(prefix_bytes) - 1
+        if pos < 0 or pos >= logits.size(1):
+            continue
+
+        pred_id = logits[0, pos].argmax().item()
+        target_id = encode_fn([target_bytes[0]])[0]
+        if pred_id == target_id:
+            correct += 1
+        total += 1
+
+    return correct / max(1, total)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="E2 FLUED vs sentencepiece/tiktoken local comparison",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument("--preset", choices=list(E2_PRESETS.keys()), default="smoke")
-    parser.add_argument("--models", default="flued,sentencepiece,tiktoken")
-    parser.add_argument("--data-path", default=None, help="Optional corpus text file")
-    parser.add_argument("--max-batches", type=int, default=20)
-    parser.add_argument("--sentencepiece-vocab-size", type=int, default=8192)
-    parser.add_argument("--tiktoken-encoding", default="cl100k_base")
-    parser.add_argument("--output-json", default=None)
-    parser.add_argument("--output-csv", default=None)
-    parser.add_argument("--device", default="cuda")
-    return parser.parse_args()
+# ---------------------------------------------------------------------------
+# FLUED adapter
+# ---------------------------------------------------------------------------
+
+def _make_flued_adapter(d_model, nhead, dim_feedforward, num_layers,
+                         max_seq_len, dropout, device):
+    from flued.model import FLUEDAutoencoder, VOCAB_SIZE
+
+    model = FLUEDAutoencoder(
+        d_model=d_model,
+        nhead=nhead,
+        dim_feedforward=dim_feedforward,
+        num_layers=num_layers,
+        max_seq_len=max_seq_len,
+        dropout=dropout,
+    ).to(device)
+
+    def encode_fn(raw_bytes):
+        return [b + 1 for b in raw_bytes]  # PAD-offset
+
+    return model, encode_fn, VOCAB_SIZE
 
 
-def main() -> int:
-    args = parse_args()
-    cfg = build_e2_preset_config(args.preset)
+# ---------------------------------------------------------------------------
+# BLT adapter
+# ---------------------------------------------------------------------------
 
-    texts = STUB_CORPUS
+def _make_blt_adapter(d_model, nhead, dim_feedforward, num_layers,
+                       max_seq_len, dropout, blt_patch_size, device):
+    from blt_baseline.model import BLTAutoencoder
+    VOCAB = 257
+
+    model = BLTAutoencoder(
+        vocab_size=VOCAB,
+        d_model=d_model,
+        nhead=nhead,
+        dim_feedforward=dim_feedforward,
+        num_encoder_layers=num_layers,
+        num_decoder_layers=num_layers,
+        max_seq_len=max_seq_len,
+        dropout=dropout,
+        local_layers=max(1, num_layers // 2),
+        patch_size=blt_patch_size,
+    ).to(device)
+
+    def encode_fn(raw_bytes):
+        return [b + 1 for b in raw_bytes]  # PAD-offset (matches FLUED v0.4)
+
+    return model, encode_fn, VOCAB
+
+
+# ---------------------------------------------------------------------------
+# sentencepiece adapter
+# ---------------------------------------------------------------------------
+
+def _make_sentencepiece_adapter(vocab_size, d_model, nhead, dim_feedforward,
+                                  num_layers, max_seq_len, dropout, texts, device):
+    try:
+        import sentencepiece as spm
+    except ImportError:
+        return None, None, None, "sentencepiece not installed (pip install sentencepiece)"
+
+    from bpe_baseline.model import BPETransformerAutoencoder
+
+    # Train a tiny SPM model on a temp file
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                     encoding="utf-8", delete=False) as tmp:
+        tmp.write("\n".join(texts))
+        tmp_path = tmp.name
+
+    model_prefix = tmp_path + ".spm"
+    try:
+        spm.SentencePieceTrainer.Train(
+            input=tmp_path,
+            model_prefix=model_prefix,
+            vocab_size=vocab_size,
+            character_coverage=0.9995,
+            model_type="bpe",
+            hard_vocab_limit=False,   # P1-3: safe for small corpora
+            pad_id=0,
+            unk_id=1,
+            bos_id=2,
+            eos_id=3,
+        )
+        sp = spm.SentencePieceProcessor()
+        sp.Load(model_prefix + ".model")
+        actual_vocab = sp.GetPieceSize()
+    except Exception as exc:
+        return None, None, None, f"sentencepiece training failed: {exc}"
+    finally:
+        os.unlink(tmp_path)
+
+    model = BPETransformerAutoencoder(
+        vocab_size=actual_vocab,
+        d_model=d_model,
+        nhead=nhead,
+        dim_feedforward=dim_feedforward,
+        num_encoder_layers=num_layers,
+        num_decoder_layers=num_layers,
+        max_seq_len=max_seq_len,
+        dropout=dropout,
+    ).to(device)
+
+    def encode_fn(raw_bytes):
+        text = bytes(raw_bytes).decode("utf-8", errors="replace")
+        return sp.EncodeAsIds(text)
+
+    return model, encode_fn, actual_vocab, None
+
+
+# ---------------------------------------------------------------------------
+# tiktoken adapter
+# ---------------------------------------------------------------------------
+
+def _make_tiktoken_adapter(d_model, nhead, dim_feedforward, num_layers,
+                             max_seq_len, dropout, device):
+    try:
+        import tiktoken
+    except ImportError:
+        return None, None, None, "tiktoken not installed (pip install tiktoken)"
+
+    from bpe_baseline.model import BPETransformerAutoencoder
+
+    enc = tiktoken.get_encoding("cl100k_base")
+    vocab_size = enc.n_vocab
+
+    model = BPETransformerAutoencoder(
+        vocab_size=vocab_size,
+        d_model=d_model,
+        nhead=nhead,
+        dim_feedforward=dim_feedforward,
+        num_encoder_layers=num_layers,
+        num_decoder_layers=num_layers,
+        max_seq_len=max_seq_len,
+        dropout=dropout,
+    ).to(device)
+
+    def encode_fn(raw_bytes):
+        text = bytes(raw_bytes).decode("utf-8", errors="replace")
+        return enc.encode(text)
+
+    return model, encode_fn, vocab_size, None
+
+
+# ---------------------------------------------------------------------------
+# Short training loop
+# ---------------------------------------------------------------------------
+
+def _train_model(model, loader, train_steps, lr, device):
+    """Run a short training loop on reconstruction objective."""
+    criterion = nn.CrossEntropyLoss(ignore_index=0)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
+    model.train()
+    train_iter = iter(loader)
+    for step in range(train_steps):
+        try:
+            src, tgt = next(train_iter)
+        except StopIteration:
+            train_iter = iter(loader)
+            src, tgt = next(train_iter)
+        src = src.to(device)
+        optimizer.zero_grad()
+        result = model(src)
+        logits = result[0]
+        aux = result[1]
+        if isinstance(aux, dict):
+            aux_loss = aux.get("compression_loss", torch.tensor(0.0, device=device))
+        else:
+            aux_loss = aux
+        loss = criterion(logits.view(-1, logits.size(-1)), src.view(-1)) + aux_loss
+        loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        if (step + 1) % 100 == 0:
+            logger.info("  train step %d/%d  loss=%.4f", step + 1, train_steps, loss.item())
+
+
+# ---------------------------------------------------------------------------
+# Main compare runner
+# ---------------------------------------------------------------------------
+
+def run_e2(args: argparse.Namespace) -> List[Dict]:
+    """Execute E2 comparison.  Returns list of result dicts."""
+    from flued.data import ByteReconstructionDataset, safe_train_eval_split, STUB_CORPUS
+
+    device_str = args.device
+    if device_str == "cuda" and not torch.cuda.is_available():
+        logger.warning("CUDA not available — falling back to CPU.")
+        device_str = "cpu"
+    device = torch.device(device_str)
+
+    # --- Load text corpus ---
+    texts: Optional[List[str]] = None
     if args.data_path:
         with open(args.data_path, encoding="utf-8") as fh:
-            texts = [line.rstrip("\n") for line in fh if line.strip()]
+            texts = fh.readlines()
+        logger.info("Loaded %d lines from %s", len(texts), args.data_path)
+    else:
+        texts = STUB_CORPUS
 
-    models = [m.strip() for m in args.models.split(",") if m.strip()]
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    if args.device == "cuda" and device.type == "cpu":
-        logger.warning("CUDA requested but unavailable, using CPU.")
+    # --- Dataset (byte-reconstruction, PAD-offset) ---
+    dataset = ByteReconstructionDataset(
+        texts=texts,
+        seq_len=args.seq_len,
+        stride=args.stride,
+    )
+    train_ds, eval_ds = safe_train_eval_split(dataset, eval_fraction=0.1, seed=42)
 
-    task_items = tiny_chinese_logic_samples()
-    rows: List[ResultRow] = []
-
-    for model_name in models:
-        try:
-            adapter = build_adapter(
-                model_name=model_name,
-                vocab_size=args.sentencepiece_vocab_size,
-                texts=texts,
-                tiktoken_encoding=args.tiktoken_encoding,
-            )
-        except OptionalDependencyError as exc:
-            rows.append(
-                ResultRow(
-                    model=model_name,
-                    status="skipped_missing_dependency",
-                    perplexity=None,
-                    m_over_n=None,
-                    cloze_accuracy=None,
-                    detail=str(exc),
-                )
-            )
-            continue
-
-        dataset = build_dataset_for_adapter(model_name, adapter, texts, seq_len=cfg["seq_len"])
-        loader = get_dataloader(dataset, batch_size=cfg["batch_size"], shuffle=False)
-        model = build_model_for_adapter(model_name, cfg, adapter).to(device)
-
-        ppl, m_over_n = evaluate_perplexity(model, loader, device, max_batches=args.max_batches)
-        cloze_acc = evaluate_logic_tasks(model, adapter, task_items, device)
-        rows.append(
-            ResultRow(
-                model=model_name,
-                status="ok",
-                perplexity=ppl,
-                m_over_n=m_over_n,
-                cloze_accuracy=cloze_acc,
-                detail=f"vocab_size={adapter.vocab_size}",
-            )
+    def _loader(ds, shuffle):
+        return DataLoader(
+            ds,
+            batch_size=args.batch_size,
+            shuffle=shuffle,
+            drop_last=len(ds) > args.batch_size,
+            pin_memory=(device_str == "cuda"),
         )
 
-    result_dicts = [row.__dict__ for row in rows]
-    print(json.dumps(result_dicts, ensure_ascii=False, indent=2))
+    train_loader = _loader(train_ds, shuffle=True)
+    eval_loader = _loader(eval_ds, shuffle=False)
+
+    cloze_samples = tiny_chinese_logic_samples()
+    requested = [m.strip() for m in args.models.split(",")]
+    results: List[Dict] = []
+
+    for model_name in requested:
+        logger.info("=== %s ===", model_name)
+        row: Dict = {"model": model_name, "status": "ok"}
+
+        # --- Build adapter ---
+        error_msg = None
+        if model_name == "flued":
+            model, encode_fn, vocab_size = _make_flued_adapter(
+                args.d_model, args.nhead, args.dim_feedforward, args.num_layers,
+                args.max_seq_len, args.dropout, device,
+            )
+        elif model_name == "blt":
+            model, encode_fn, vocab_size = _make_blt_adapter(
+                args.d_model, args.nhead, args.dim_feedforward, args.num_layers,
+                args.max_seq_len, args.dropout, args.blt_patch_size, device,
+            )
+        elif model_name == "sentencepiece":
+            model, encode_fn, vocab_size, error_msg = _make_sentencepiece_adapter(
+                args.sentencepiece_vocab_size, args.d_model, args.nhead,
+                args.dim_feedforward, args.num_layers, args.max_seq_len,
+                args.dropout, texts, device,
+            )
+        elif model_name == "tiktoken":
+            model, encode_fn, vocab_size, error_msg = _make_tiktoken_adapter(
+                args.d_model, args.nhead, args.dim_feedforward, args.num_layers,
+                args.max_seq_len, args.dropout, device,
+            )
+        else:
+            row["status"] = "error"
+            row["detail"] = f"Unknown model name: {model_name}"
+            results.append(row)
+            continue
+
+        if error_msg or model is None:
+            row["status"] = "skipped"
+            row["detail"] = error_msg or "adapter returned None"
+            logger.warning("Skipping %s: %s", model_name, row["detail"])
+            results.append(row)
+            continue
+
+        n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        logger.info("  %s params=%s", model_name, f"{n_params:,}")
+
+        # --- Optional checkpoint load ---
+        if args.checkpoint and model_name == "flued":
+            try:
+                ckpt = torch.load(args.checkpoint, map_location=device)
+                state = ckpt.get("model_state_dict", ckpt)
+                model.load_state_dict(state)
+                logger.info("  Loaded checkpoint: %s", args.checkpoint)
+            except Exception as exc:
+                logger.warning("  Failed to load checkpoint: %s", exc)
+
+        # --- Optional training ---
+        if args.mode == "train_eval" and args.train_steps > 0:
+            logger.info("  Training for %d steps …", args.train_steps)
+            _train_model(model, train_loader, args.train_steps, args.lr, device)
+
+        # --- Save checkpoint ---
+        if args.save_checkpoint and model_name == "flued":
+            torch.save({"model_state_dict": model.state_dict()}, args.save_checkpoint)
+            logger.info("  Checkpoint saved to %s", args.save_checkpoint)
+
+        # --- Evaluation ---
+        ppl = compute_perplexity(model, eval_loader, vocab_size, device)
+        cloze = compute_cloze_accuracy(
+            model, cloze_samples, encode_fn, vocab_size, device, args.max_seq_len
+        )
+
+        m_over_n = None
+        if model_name == "flued":
+            model.eval()
+            with torch.no_grad():
+                for src, _ in eval_loader:
+                    src = src.to(device)
+                    _, metrics = model(src)
+                    m_over_n = metrics.get("m_over_n")
+                    break
+
+        row.update({
+            "perplexity": round(ppl, 4),
+            "m_over_n": round(m_over_n, 4) if m_over_n is not None else None,
+            "cloze_accuracy": round(cloze, 4),
+            "n_params": n_params,
+        })
+        logger.info(
+            "  ppl=%.2f  cloze=%.4f  m/n=%s",
+            ppl, cloze, f"{m_over_n:.4f}" if m_over_n is not None else "N/A",
+        )
+        results.append(row)
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="FLUED E2 — compare dynamic segmentation vs. tokenizer baselines",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    parser.add_argument(
+        "--preset", choices=list(PRESETS.keys()), default=None,
+        help="Named preset (values overridden by explicit flags)",
+    )
+    parser.add_argument(
+        "--models", default="flued",
+        help="Comma-separated list: flued,sentencepiece,tiktoken,blt",
+    )
+    parser.add_argument(
+        "--mode", choices=["eval_only", "train_eval"], default="eval_only",
+        help="eval_only: just evaluate; train_eval: train then evaluate",
+    )
+
+    # Model architecture
+    parser.add_argument("--d-model", type=int, default=None)
+    parser.add_argument("--nhead", type=int, default=None)
+    parser.add_argument("--dim-feedforward", type=int, default=None)
+    parser.add_argument("--num-layers", type=int, default=None)
+    parser.add_argument("--max-seq-len", type=int, default=None)
+    parser.add_argument("--dropout", type=float, default=None)
+    parser.add_argument("--blt-patch-size", type=int, default=None)
+
+    # Training
+    parser.add_argument("--train-steps", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--batch-size", type=int, default=None)
+
+    # Data
+    parser.add_argument("--data-path", default=None)
+    parser.add_argument("--seq-len", type=int, default=None)
+    parser.add_argument("--stride", type=int, default=None)
+    parser.add_argument("--device", default="cpu")
+
+    # Baseline-specific
+    parser.add_argument("--sentencepiece-vocab-size", type=int, default=None)
+
+    # Checkpoint
+    parser.add_argument("--checkpoint", default=None, help="Load model checkpoint (FLUED only)")
+    parser.add_argument("--save-checkpoint", default=None, help="Save FLUED checkpoint after training")
+
+    # Output
+    parser.add_argument("--output-json", default=None)
+    parser.add_argument("--output-csv", default=None)
+
+    args = parser.parse_args()
+
+    # Apply preset
+    preset_name = args.preset or "smoke"
+    defaults = PRESETS.get(preset_name, PRESETS["smoke"]).copy()
+    for key, val in defaults.items():
+        attr = key.replace("-", "_")
+        if getattr(args, attr, None) is None:
+            setattr(args, attr, val)
+
+    # Hard fallbacks
+    for attr, val in [
+        ("d_model", 64), ("nhead", 4), ("dim_feedforward", 128),
+        ("num_layers", 2), ("max_seq_len", 32), ("dropout", 0.0),
+        ("batch_size", 4), ("seq_len", 32), ("stride", 16),
+        ("train_steps", 0), ("blt_patch_size", 4),
+        ("sentencepiece_vocab_size", 256),
+    ]:
+        if getattr(args, attr, None) is None:
+            setattr(args, attr, val)
+
+    return args
+
+
+def main() -> None:
+    args = _parse_args()
+    results = run_e2(args)
+
+    # Print summary table
+    print("\n=== E2 Results ===")
+    header = f"{'Model':<20} {'Status':<10} {'PPL':>10} {'m/n':>8} {'Cloze':>8} {'Params':>12}"
+    print(header)
+    print("-" * len(header))
+    for r in results:
+        print(
+            f"{r['model']:<20} {r.get('status',''):<10} "
+            f"{r.get('perplexity', 'N/A'):>10} "
+            f"{str(r.get('m_over_n', 'N/A')):>8} "
+            f"{str(r.get('cloze_accuracy', 'N/A')):>8} "
+            f"{str(r.get('n_params', 'N/A')):>12}"
+        )
 
     if args.output_json:
         with open(args.output_json, "w", encoding="utf-8") as fh:
-            json.dump(result_dicts, fh, ensure_ascii=False, indent=2)
+            json.dump(results, fh, indent=2)
+        logger.info("JSON written to %s", args.output_json)
 
     if args.output_csv:
-        with open(args.output_csv, "w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=list(result_dicts[0].keys()) if result_dicts else ["model"])
-            writer.writeheader()
-            writer.writerows(result_dicts)
-
-    return 0
+        if results:
+            with open(args.output_csv, "w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=results[0].keys())
+                writer.writeheader()
+                writer.writerows(results)
+            logger.info("CSV written to %s", args.output_csv)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
