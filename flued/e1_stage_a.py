@@ -103,7 +103,7 @@ PRESETS: Dict[str, Dict] = {
         "num_layers": 24,
         "max_seq_len": 512,
         "dropout": 0.0,
-        "batch_size": 4,
+        "batch_size": 1,
         "max_steps": 10000,
         "lr": 3e-5,
         "warmup_steps": 500,

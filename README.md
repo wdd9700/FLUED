@@ -76,6 +76,11 @@ pip install sentencepiece tiktoken
 > Stage A (`e1_stage_a.py`) is the reconstruction-only experiment.
 > Stage B (generative backbone) is **not yet implemented**.
 > E2 comparison (`e2_compare.py`) is a scaffold — it requires trained checkpoints to produce meaningful results.
+>
+> **E2 Stage A cloze ≠ true conditional probability.**
+> Cloze scores under Stage A are a reconstruction proxy (byte-level NLL over options fed to an autoencoder).
+> True conditional probability scoring — `score(option) = NLL(option | prefix)` — requires a causal LM backbone and belongs to Stage B.
+> Cross-tokenizer cloze comparisons (FLUED vs. sentencepiece vs. tiktoken) are directional signals only; byte-level and token-level models are not directly comparable on the same scoring function.
 
 ## E1 commands
 
