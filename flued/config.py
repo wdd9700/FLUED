@@ -28,6 +28,8 @@ SIZE_CONFIGS: Dict[str, Dict[str, Any]] = {
         "dim_feedforward": 1024,
         "num_encoder_layers": 4,
         "num_decoder_layers": 4,
+        # FLUED v0.4 uses a single num_layers (tied enc+dec weights)
+        "num_layers": 4,
     },
     "medium": {
         # ~50M params — development/ablation
@@ -36,16 +38,18 @@ SIZE_CONFIGS: Dict[str, Dict[str, Any]] = {
         "dim_feedforward": 2048,
         "num_encoder_layers": 8,
         "num_decoder_layers": 8,
+        "num_layers": 8,
     },
     "300M": {
         # ~300M params — full Stage A experiment (fits in 16 GB VRAM with batch 8–16)
-        # d_model=1024, 16 heads, 4096 FF, 12 enc + 12 dec layers
-        # Each layer ≈ 4*1024^2 (attn) + 2*1024*4096 (FF) ≈ 12.6M → 24 layers ≈ 302M
+        # BPE/BLT: 12 enc + 12 dec layers × ~12.6M each ≈ 302M
+        # FLUED v0.4: 24 tied layers × ~12.6M each ≈ 302M (shared enc/dec weights)
         "d_model": 1024,
         "nhead": 16,
         "dim_feedforward": 4096,
         "num_encoder_layers": 12,
         "num_decoder_layers": 12,
+        "num_layers": 24,
     },
 }
 
@@ -71,19 +75,26 @@ class ModelConfig:
     dim_feedforward: int = 1024
     num_encoder_layers: int = 4
     num_decoder_layers: int = 4
-    dropout: float = 0.1
+    dropout: float = 0.0          # E1 default: 0.0 (tied inverse is dropout-sensitive)
     max_seq_len: int = 512
 
-    # Byte-level vocabulary (used by FLUED and BLT; 256 possible byte values)
-    vocab_size: int = 256
+    # Byte-level vocabulary — v0.4 PAD-offset encoding: PAD=0, byte b → b+1
+    vocab_size: int = 257
 
-    # ------- FLUED-specific -------
-    # Number of shallow Transformer layers for the DSC front-end
+    # ------- FLUED v0.4-specific -------
+    # num_layers is the single depth parameter (encoder and decoder share weights)
+    num_layers: int = 4
+    # Hard boundary threshold for span extraction (inference / metrics)
+    boundary_threshold: float = 0.5
+    # Soft boundary density target (compression_loss drives boundary_head training)
+    target_compression: float = 0.3
+    # Weight on the compression loss term
+    compression_weight: float = 0.1
+
+    # ------- Legacy FLUED fields (ignored by FLUEDAutoencoder v0.4) -------
     shallow_layers: int = 2
-    # λ for bridge potential exponential decay
     bridge_decay: float = 0.1
-    # Weight on SGL gate entropy regularization loss
-    gate_entropy_weight: float = 0.01
+    gate_entropy_weight: float = 0.0
 
     # ------- BPE-specific -------
     # Target BPE vocabulary size (64k as per problem statement)

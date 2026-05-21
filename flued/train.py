@@ -15,12 +15,12 @@ import logging
 import math
 import os
 import random
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 
 from flued.config import ModelConfig, TrainConfig
 from flued.data import (
@@ -29,6 +29,7 @@ from flued.data import (
     ByteTextDataset,
     SimpleBPE,
     get_dataloader,
+    safe_train_eval_split,
 )
 
 logging.basicConfig(
@@ -76,12 +77,12 @@ def build_model(model_cfg: ModelConfig) -> nn.Module:
             d_model=model_cfg.d_model,
             nhead=model_cfg.nhead,
             dim_feedforward=model_cfg.dim_feedforward,
-            num_encoder_layers=model_cfg.num_encoder_layers,
-            num_decoder_layers=model_cfg.num_decoder_layers,
+            num_layers=model_cfg.num_layers,
             max_seq_len=model_cfg.max_seq_len,
             dropout=model_cfg.dropout,
-            shallow_layers=model_cfg.shallow_layers,
-            gate_entropy_weight=model_cfg.gate_entropy_weight,
+            boundary_threshold=model_cfg.boundary_threshold,
+            target_compression=model_cfg.target_compression,
+            compression_weight=model_cfg.compression_weight,
         )
 
     elif model_cfg.model_type == "bpe":
@@ -239,7 +240,13 @@ def eval_step(
         if i >= max_batches:
             break
         src, tgt = src.to(device), tgt.to(device)
-        logits, aux_loss = model(src, tgt)
+        result = model(src, tgt)
+        logits = result[0]
+        aux = result[1]
+        if isinstance(aux, dict):
+            aux_loss = aux.get("compression_loss", torch.tensor(0.0, device=device))
+        else:
+            aux_loss = aux
         loss = criterion(logits.view(-1, logits.size(-1)), tgt.view(-1)) + aux_loss
         total_loss += loss.item()
         total_acc += compute_reconstruction_accuracy(logits, tgt)
@@ -324,7 +331,13 @@ class Trainer:
             src, tgt = src.to(self.device), tgt.to(self.device)
 
             self.optimizer.zero_grad()
-            logits, aux_loss = self.model(src, tgt)
+            result = self.model(src, tgt)
+            logits = result[0]
+            aux = result[1]
+            if isinstance(aux, dict):
+                aux_loss = aux.get("compression_loss", torch.tensor(0.0, device=self.device))
+            else:
+                aux_loss = aux
 
             recon_loss = self.criterion(
                 logits.view(-1, logits.size(-1)), tgt.view(-1)
@@ -410,13 +423,9 @@ def main() -> None:
     model = build_model(model_cfg)
     dataset, _ = build_dataset(model_cfg, train_cfg)
 
-    # 90 / 10 train / eval split
-    n_eval = max(1, len(dataset) // 10)
-    n_train = len(dataset) - n_eval
-    train_ds, eval_ds = random_split(
-        dataset,
-        [n_train, n_eval],
-        generator=torch.Generator().manual_seed(train_cfg.seed),
+    # 90 / 10 train / eval split (robust to tiny datasets)
+    train_ds, eval_ds = safe_train_eval_split(
+        dataset, eval_fraction=0.1, seed=train_cfg.seed
     )
 
     train_loader = get_dataloader(train_ds, batch_size=train_cfg.batch_size, shuffle=True)
