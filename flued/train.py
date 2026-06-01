@@ -66,8 +66,8 @@ def build_model(model_cfg: ModelConfig) -> nn.Module:
             d_model=model_cfg.d_model,
             nhead=model_cfg.nhead,
             dim_feedforward=model_cfg.dim_feedforward,
-            num_encoder_layers=model_cfg.num_layers,
-            num_decoder_layers=model_cfg.num_layers,
+            num_encoder_layers=model_cfg.num_encoder_layers,
+            num_decoder_layers=model_cfg.num_decoder_layers,
             max_seq_len=model_cfg.max_seq_len,
             dropout=model_cfg.dropout,
         )
@@ -80,12 +80,12 @@ def build_model(model_cfg: ModelConfig) -> nn.Module:
             d_model=model_cfg.d_model,
             nhead=model_cfg.nhead,
             dim_feedforward=model_cfg.dim_feedforward,
-            num_encoder_layers=model_cfg.num_layers,
-            num_decoder_layers=model_cfg.num_layers,
+            num_encoder_layers=model_cfg.num_encoder_layers,
+            num_decoder_layers=model_cfg.num_decoder_layers,
             max_seq_len=model_cfg.max_seq_len,
             dropout=model_cfg.dropout,
-            local_layers=model_cfg.local_layers,
-            patch_size=model_cfg.patch_size,
+            patch_mode="entropy",
+            entropy_theta=3.5,
         )
 
     raise ValueError(f"Unknown model_type: {model_cfg.model_type!r}")
