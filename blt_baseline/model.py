@@ -412,7 +412,15 @@ class BLTAutoencoder(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
+        # Collect all parameters that belong to the pre-trained ByteLM subtree
+        local_lm_params = set()
+        if self.local_lm is not None:
+            local_lm_params = set(self.local_lm.parameters())
         for module in self.modules():
+            # Skip any module whose parameters overlap with ByteLM
+            mod_params = set(module.parameters(recurse=False))
+            if mod_params and mod_params.issubset(local_lm_params):
+                continue
             if isinstance(module, nn.Linear):
                 nn.init.trunc_normal_(module.weight, std=0.02)
                 if module.bias is not None:
