@@ -277,8 +277,8 @@ def _make_blt_adapter(d_model, nhead, dim_feedforward, num_layers,
         num_decoder_layers=num_layers,
         max_seq_len=max_seq_len,
         dropout=dropout,
-        local_layers=max(1, num_layers // 2),
-        patch_size=blt_patch_size,
+        patch_mode="entropy",
+        entropy_theta=3.5,
     ).to(device)
 
     def encode_fn(raw_bytes):

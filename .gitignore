@@ -28,3 +28,26 @@ Thumbs.db
 
 # Environment
 .env
+
+# Model checkpoints
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Binary archives & executables
+*.7z*
+*.exe
+*.dll
+*.so
+
+# Data files (large corpora)
+corpus*.txt
+*.bin
+*.u32
+
+# Cloud run scripts (may contain credentials)
+_cloud_run_*.sh
+
+# BPE standalone (binary distribution)
+bpe_baseline_standalone/

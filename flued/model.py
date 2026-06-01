@@ -159,8 +159,23 @@ class FLUEDAutoencoder(nn.Module):
         max_seq_len: int = 512,
         dropout: float = 0.0,
         boundary_threshold: float = 0.5,
+        boundary_temperature: float = 1.0,
         target_compression: float = 0.3,
         compression_weight: float = 0.1,
+        # Type-conditional boundary regularization (default 0 = disabled)
+        lambda_var: float = 0.0,
+        lambda_entropy: float = 0.0,
+        lambda_utf8: float = 0.0,
+        # CJK-specific boundary target (legacy MSE penalty; kept for back-compat)
+        lambda_cjk: float = 0.0,
+        cjk_target: float = 0.16,
+        # Type-conditional BCE prior — per-type target boundary probability.
+        # Implements README §"lambda_type × MSE(p, type_target) — type-conditional prior",
+        # but uses BCE instead of MSE (non-vanishing gradient near saturation).
+        # Active iff lambda_type > 0. type_targets overrides defaults; any subset of
+        # the keys below is accepted (missing keys → skipped).
+        lambda_type: float = 0.0,
+        type_targets: Optional[Dict[str, float]] = None,
         # Legacy keyword arguments — accepted but ignored for backward compat
         num_encoder_layers: Optional[int] = None,
         num_decoder_layers: Optional[int] = None,
@@ -171,8 +186,28 @@ class FLUEDAutoencoder(nn.Module):
         self.vocab_size = vocab_size
         self.d_model = d_model
         self.boundary_threshold = boundary_threshold
+        self.boundary_temperature = max(boundary_temperature, 1e-3)
         self.target_compression = target_compression
         self.compression_weight = compression_weight
+        self.lambda_var = lambda_var
+        self.lambda_entropy = lambda_entropy
+        self.lambda_utf8 = lambda_utf8
+        self.lambda_cjk = lambda_cjk
+        self.cjk_target = cjk_target
+        self.lambda_type = lambda_type
+        # Default per-type boundary targets (v5e).
+        # is_cont REMOVED — utf8 continuation is already handled independently
+        # by lambda_utf8.  Keeping it in type_loss wasted gradient budget on
+        # the largest byte class (40%) at the expense of op/digit.
+        _default_targets = {
+            "is_cjk_lead": 0.15,
+            "is_alpha":    0.40,
+            "is_digit":    0.60,
+            "is_operator": 0.80,
+        }
+        if type_targets:
+            _default_targets.update(type_targets)
+        self.type_targets: Dict[str, float] = _default_targets
 
         # num_encoder_layers alias for num_layers (migration support)
         if num_encoder_layers is not None and num_layers == 4:
@@ -209,6 +244,124 @@ class FLUEDAutoencoder(nn.Module):
                 nn.init.trunc_normal_(module.weight, std=0.02)
 
     # ------------------------------------------------------------------
+    # Byte type classification + type-conditional boundary regularization
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _classify_bytes(src: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Classify each byte position for type-conditional boundary priors.
+
+        Args:
+            src: [B, T] token ids (PAD=0, byte b → id b+1)
+
+        Returns:
+            Dict of bool masks [B, T], PAD positions already excluded.
+        """
+        raw = src.long() - 1  # raw byte value; PAD → -1
+        valid = src != PAD_ID
+
+        is_cont     = valid & (raw >= 0x80) & (raw <= 0xBF)         # UTF-8 continuation
+        is_alpha    = valid & (
+            ((raw >= 0x61) & (raw <= 0x7A)) |  # a-z
+            ((raw >= 0x41) & (raw <= 0x5A))    # A-Z
+        )
+        is_digit    = valid & (raw >= 0x30) & (raw <= 0x39)
+        _op_vals    = torch.tensor(
+            [0x21, 0x23, 0x25, 0x26, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D,
+             0x2E, 0x2F, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x40, 0x5B, 0x5C,
+             0x5D, 0x5E, 0x5F, 0x7B, 0x7C, 0x7D, 0x7E],
+            device=src.device,
+        )
+        is_operator = valid & torch.isin(raw, _op_vals)
+        is_cjk_lead = valid & (raw >= 0xE4) & (raw <= 0xE9)  # most CJK lead bytes
+
+        return {
+            "is_cont":     is_cont,
+            "is_alpha":    is_alpha,
+            "is_digit":    is_digit,
+            "is_operator": is_operator,
+            "is_cjk_lead": is_cjk_lead,
+        }
+
+    def _boundary_loss(
+        self,
+        boundary_probs: torch.Tensor,   # [B, T]
+        valid_mask: torch.Tensor,        # [B, T] bool
+        byte_types: Optional[Dict],
+    ) -> torch.Tensor:
+        """Multi-term boundary regularization.
+
+        mean_loss    — global compression budget  (compression_weight)
+        var_loss     — encourage prob spread       (lambda_var, negated)
+        entropy_loss — polarize toward 0/1        (lambda_entropy)
+        utf8_loss    — suppress continuation cuts  (lambda_utf8)
+        cjk_loss     — pull CJK-lead bp toward cjk_target via BCE (lambda_cjk)
+        type_loss    — per-type BCE prior on boundary probs       (lambda_type)
+        """
+        eps = 1e-4
+        p   = boundary_probs[valid_mask]        # [N_valid]
+        # Clamp & entropy compute in FP32: FP16 1.0-1e-4 rounds to 1.0 → log(0)=NaN
+        p_f32 = p.float()
+        p_c = p_f32.clamp(eps, 1.0 - eps)
+
+        mean_loss    = self.compression_weight * (p_f32.mean() - self.target_compression) ** 2
+        var_loss     = -self.lambda_var * p_f32.var(unbiased=False)
+        entropy_loss = self.lambda_entropy * (
+            -(p_c * p_c.log() + (1.0 - p_c) * (1.0 - p_c).log())
+        ).mean()
+
+        if self.lambda_utf8 > 0 and byte_types is not None:
+            cont_mask = byte_types.get("is_cont")
+            utf8_loss = (
+                self.lambda_utf8 * boundary_probs[cont_mask].mean()
+                if (cont_mask is not None and cont_mask.any())
+                else mean_loss.new_zeros(())
+            )
+        else:
+            utf8_loss = mean_loss.new_zeros(())
+
+        # ---- CJK BCE prior (replaces former MSE) ----
+        # MSE has gradient 2*(p − target) which vanishes at saturation and is
+        # too weak to escape the 0.33 plateau observed in retrain v2/v3.
+        # BCE: dL/dp = (p − target) / (p (1 − p))  →  large gradient when far away.
+        if self.lambda_cjk > 0 and byte_types is not None:
+            cjk_mask = byte_types.get("is_cjk_lead")
+            if cjk_mask is not None and cjk_mask.any():
+                cjk_p = boundary_probs[cjk_mask].float().clamp(eps, 1.0 - eps)
+                t = float(self.cjk_target)
+                cjk_loss = self.lambda_cjk * (
+                    -(t * cjk_p.log() + (1.0 - t) * (1.0 - cjk_p).log())
+                ).mean()
+            else:
+                cjk_loss = mean_loss.new_zeros(())
+        else:
+            cjk_loss = mean_loss.new_zeros(())
+
+        # ---- Type-conditional BCE prior ----
+        # Implements README "lambda_type × per-type prior". Uses BCE (cross-entropy
+        # between current p and a constant target) for non-vanishing gradients.
+        # NOTE (v5d): sum across types instead of mean — eliminates the ÷5
+        # dilution that made per-type gradients 5× too weak at late-stage lr.
+        if self.lambda_type > 0 and byte_types is not None:
+            type_terms = []
+            for mask_name, target in self.type_targets.items():
+                m = byte_types.get(mask_name)
+                if m is None or not m.any():
+                    continue
+                p_t = boundary_probs[m].float().clamp(eps, 1.0 - eps)
+                tgt = float(target)
+                term = -(tgt * p_t.log() + (1.0 - tgt) * (1.0 - p_t).log()).mean()
+                type_terms.append(term)
+            if type_terms:
+                type_loss = self.lambda_type * torch.stack(type_terms).sum()
+            else:
+                type_loss = mean_loss.new_zeros(())
+        else:
+            type_loss = mean_loss.new_zeros(())
+
+        return mean_loss + var_loss + entropy_loss + utf8_loss + cjk_loss + type_loss
+
+    # ------------------------------------------------------------------
     # Soft assignment (differentiable, for training)
     # ------------------------------------------------------------------
 
@@ -223,19 +376,28 @@ class FLUEDAutoencoder(nn.Module):
         via softmax to form a proper probability distribution over segment
         starts for each query position.
 
+        The entire computation is performed in float32 regardless of the
+        autocast context (bf16/fp16) to avoid NaN from log1p / cumsum /
+        softmax over T=512 positions in low precision.  The result is cast
+        back to the caller's dtype before return.
+
         Args:
             boundary_probs: [B, T] sigmoid activations in (0, 1)
 
         Returns:
             soft_A: [B, T, T] row-stochastic assignment matrix
         """
-        B, T = boundary_probs.shape
-        eps = 1e-6
+        orig_dtype = boundary_probs.dtype
+        # Upcast to float32 for the entire log-space computation
+        p = boundary_probs.float()
+        B, T = p.shape
 
-        # log(1 − p) — clamped for safety
-        log_no_boundary = torch.log1p(
-            -(boundary_probs.clamp(min=eps, max=1.0 - eps))
-        )  # [B, T]
+        # eps=1e-4: safe for fp32; 1e-6 is too tight for bf16-origin inputs
+        eps = 1e-4
+        p = p.clamp(min=eps, max=1.0 - eps)
+
+        # log(1 − p)
+        log_no_boundary = torch.log1p(-p)  # [B, T]
 
         # cumlog[b, i] = Σ_{k=0}^{i} log(1-p[k])
         cumlog = torch.cumsum(log_no_boundary, dim=1)  # [B, T]
@@ -247,18 +409,21 @@ class FLUEDAutoencoder(nn.Module):
         log_stay = cumlog_i - cumlog_j   # [B, T, T]
 
         # Mask upper triangle: j > i is impossible
+        # Use -1e4 (not -1e9) to stay well within fp32 range and avoid
+        # softmax instability from extreme values.
         upper = torch.triu(
-            torch.ones(T, T, dtype=torch.bool, device=boundary_probs.device),
+            torch.ones(T, T, dtype=torch.bool, device=p.device),
             diagonal=1,
         )
-        log_stay = log_stay.masked_fill(upper.unsqueeze(0), -1e9)
+        log_stay = log_stay.masked_fill(upper.unsqueeze(0), -1e4)
 
         # Add log(p[j]) broadcast over query-position dimension i
-        log_bp = torch.log(boundary_probs.clamp(min=eps))  # [B, T]
-        log_w = log_stay + log_bp.unsqueeze(1)              # [B, T, T]
+        log_bp = torch.log(p)                       # [B, T], already clamped
+        log_w = log_stay + log_bp.unsqueeze(1)       # [B, T, T]
 
-        # Row-normalise → soft assignment probabilities
-        return torch.softmax(log_w, dim=2)  # [B, T, T]
+        # Row-normalise → soft assignment probabilities, then downcast
+        soft_A = torch.softmax(log_w, dim=2)         # [B, T, T] float32
+        return soft_A.to(orig_dtype)
 
     # ------------------------------------------------------------------
     # Hard segmentation (non-differentiable, for metrics / inference)
@@ -303,82 +468,114 @@ class FLUEDAutoencoder(nn.Module):
         hidden: torch.Tensor,
         boundary_scores: torch.Tensor,
         src_key_padding_mask: Optional[torch.Tensor] = None,
+        byte_types: Optional[Dict] = None,
+        skip_hard: bool = True,
     ) -> Tuple[torch.Tensor, Dict]:
         """Produce both soft (training) and hard (metrics) segmentations.
 
-        Soft path:
+        Soft path (always active):
             A  = _soft_assignment(boundary_probs)  [B, T, T]
             Z  = Aᵀ H                              [B, T, d]  (pooling)
             Ẑ  = A Z                               [B, T, d]  (expanding)
 
-        Hard path (no grad):
+        Hard path (skip_hard=False, for metrics only):
             threshold → spans → mean-pool → Z_hard
 
-        Compression loss (differentiable):
-            soft_m_over_n = mean(boundary_probs[valid]) ≈ m/n
-            loss = compression_weight × (soft_m_over_n − target_compression)²
-
-        Returns:
-            expanded_soft: [B, T, d_model]  differentiable latent for decode
-            metrics:       dict
+        When skip_hard=True: skips all CPU for-loops (hard seg, z_hard pool,
+        sweep). Keeps type_bp monitoring.
         """
         B, T, d = hidden.shape
-        boundary_probs = torch.sigmoid(boundary_scores)  # [B, T]
-        boundary_probs = boundary_probs.clone()
-        boundary_probs[:, 0] = 1.0  # first token is always a boundary (soft/hard aligned)
+        boundary_probs = torch.sigmoid(boundary_scores / self.boundary_temperature)  # [B, T]
+        # Avoid in-place on tensor with grad: replace col 0 via mask
+        mask0 = torch.zeros_like(boundary_probs)
+        mask0[:, 0] = 1.0
+        boundary_probs = boundary_probs * (1.0 - mask0) + mask0  # col0=1.0, rest unchanged
 
-        # ---- soft path ----
+        # ---- soft path (always) ----
         soft_A = self._soft_assignment(boundary_probs)          # [B, T, T]
         z_soft = torch.bmm(soft_A.transpose(1, 2), hidden)      # [B, T, d]
         expanded_soft = torch.bmm(soft_A, z_soft)               # [B, T, d]
 
-        # ---- differentiable compression metric ----
+        # ---- valid mask + soft m/n ----
         if src_key_padding_mask is not None:
-            valid_mask = ~src_key_padding_mask                   # [B, T]
-            valid_n = valid_mask.float().sum(dim=1)              # [B]
-            soft_m_over_n = (
-                (boundary_probs * valid_mask.float()).sum(dim=1)
-                / valid_n.clamp(min=1)
-            ).mean()
+            valid_mask = ~src_key_padding_mask
         else:
-            soft_m_over_n = boundary_probs.mean()
+            valid_mask = torch.ones(B, T, dtype=torch.bool, device=hidden.device)
+        valid_n = valid_mask.float().sum(dim=1)
 
-        compression_loss = self.compression_weight * (
-            soft_m_over_n - self.target_compression
-        ) ** 2
+        # Soft m/n via cumsum(bp) — no threshold
+        soft_m_over_n = (
+            (boundary_probs * valid_mask.float()).sum(dim=1)
+            / valid_n.clamp(min=1)
+        ).mean()
 
-        # ---- hard path (no grad) ----
-        spans, span_ids = self._hard_segmentation(boundary_probs)
+        # ---- multi-term boundary regularization loss ----
+        compression_loss = self._boundary_loss(boundary_probs, valid_mask, byte_types)
 
-        hard_m = torch.tensor(
-            [len(s) for s in spans], dtype=torch.float, device=hidden.device
-        )
-        if src_key_padding_mask is not None:
-            valid_n_hard = (~src_key_padding_mask).float().sum(dim=1)
-        else:
-            valid_n_hard = torch.full(
-                (B,), T, dtype=torch.float, device=hidden.device
+        # ---- per-type boundary prob means (keep even in skip_hard) ----
+        type_means: Dict[str, float] = {}
+        if byte_types is not None:
+            with torch.no_grad():
+                bp_d = boundary_probs.detach()
+                for key, label in (
+                    ("is_cont",     "utf8_cont"),
+                    ("is_alpha",    "ascii"),
+                    ("is_cjk_lead", "cjk"),
+                    ("is_operator", "op"),
+                    ("is_digit",    "digit"),
+                ):
+                    mask = byte_types.get(key)
+                    type_means[f"{label}_bp_mean"] = (
+                        bp_d[mask].mean().item()
+                        if (mask is not None and mask.any())
+                        else float("nan")
+                    )
+
+        # ---- hard path (skip if not needed) ----
+        if not skip_hard:
+            spans, span_ids = self._hard_segmentation(boundary_probs)
+            hard_m = torch.tensor(
+                [len(s) for s in spans], dtype=torch.float, device=hidden.device
             )
-        hard_m_over_n = (hard_m / valid_n_hard.clamp(min=1)).mean()
+            hard_m_over_n = (hard_m / valid_n.clamp(min=1)).mean()
+            num_units = hard_m.mean().item()
 
-        # Mean-pool hard spans → z_hard (interpretability / logging)
-        max_units = max(len(s) for s in spans)
-        z_hard = torch.zeros(B, max_units, d, device=hidden.device)
-        for b in range(B):
-            for j, (start, end) in enumerate(spans[b]):
-                z_hard[b, j] = hidden[b, start:end].mean(dim=0)
+            max_units = max(len(s) for s in spans)
+            z_hard = torch.zeros(B, max_units, d, device=hidden.device)
+            for b in range(B):
+                for j, (start, end) in enumerate(spans[b]):
+                    z_hard[b, j] = hidden[b, start:end].mean(dim=0)
+
+            with torch.no_grad():
+                bp_det = boundary_probs.detach()
+                sweep: Dict[float, float] = {}
+                for thr in (0.50, 0.55, 0.60, 0.65):
+                    h_mask = (bp_det > thr).float()
+                    h_mask[:, 0] = 1.0
+                    m_thr = h_mask.sum(dim=1)
+                    sweep[thr] = (m_thr / valid_n.clamp(min=1)).mean().item()
+        else:
+            # Soft-only: use cumsum(bp) for segment count
+            soft_m = boundary_probs.sum(dim=1).mean().item()
+            hard_m_over_n = soft_m_over_n
+            num_units = soft_m
+            z_hard = z_soft  # placeholder
+            spans = []
+            sweep = {}
 
         metrics: Dict = {
-            "m_over_n": hard_m_over_n.item(),
-            "hard_m_over_n": hard_m_over_n.item(),
+            "m_over_n": hard_m_over_n.item() if not skip_hard else hard_m_over_n,
+            "hard_m_over_n": hard_m_over_n.item() if not skip_hard else hard_m_over_n,
             "soft_m_over_n": soft_m_over_n,
-            "num_units": hard_m.mean().item(),
-            "num_units_tensor": hard_m.mean(),
+            "num_units": num_units,
+            "num_units_tensor": torch.tensor(num_units, device=hidden.device),
             "spans": spans,
-            "span_ids": span_ids,
+            "span_ids": torch.zeros(B, T, dtype=torch.long, device=hidden.device) if skip_hard else span_ids,
             "boundary_probs": boundary_probs,
             "compression_loss": compression_loss,
             "z": z_hard,
+            "hard_mn_sweep": sweep,
+            **type_means,
         }
         return expanded_soft, metrics
 
@@ -390,27 +587,25 @@ class FLUEDAutoencoder(nn.Module):
         self,
         src: torch.Tensor,
         src_key_padding_mask: Optional[torch.Tensor] = None,
+        skip_hard: bool = True,
     ) -> Tuple[torch.Tensor, Dict]:
         """Encode byte ids to a differentiable soft-expanded latent.
 
         Args:
-            src:                  [B, T] byte token ids (PAD=0, byte b → b+1)
+            src:                  [B, T] byte token ids
             src_key_padding_mask: [B, T] bool (True = padding)
-
-        Returns:
-            expanded_soft: [B, T, d_model]
-            metrics:       dict with boundary_probs, spans, m/n, etc.
+            skip_hard:            skip hard segmentation for-loops (faster, pure soft)
         """
-        h = self.pos_enc(self.embedding(src))  # [B, T, d]
+        h = self.pos_enc(self.embedding(src))
         for block in self.blocks:
             h = block.forward_block(h, key_padding_mask=src_key_padding_mask)
 
-        # Boundary scoring: delta between adjacent hidden states
         delta = torch.zeros_like(h)
         delta[:, 1:] = h[:, 1:] - h[:, :-1]
-        boundary_scores = self.boundary_head(delta).squeeze(-1)  # [B, T]
+        boundary_scores = self.boundary_head(delta).squeeze(-1)
 
-        return self._compile_semantic_units(h, boundary_scores, src_key_padding_mask)
+        byte_types = self._classify_bytes(src)
+        return self._compile_semantic_units(h, boundary_scores, src_key_padding_mask, byte_types, skip_hard=skip_hard)
 
     def decode(
         self,
@@ -433,19 +628,21 @@ class FLUEDAutoencoder(nn.Module):
         self,
         src: torch.Tensor,
         tgt: Optional[torch.Tensor] = None,
+        skip_hard: bool = True,
     ) -> Tuple[torch.Tensor, Dict]:
         """Full autoencoder forward.
 
         Args:
             src: [B, T] byte token ids (PAD=0, byte b → b+1)
-            tgt: unused (kept for API compat); reconstruction always targets src
+            tgt: unused (kept for API compat)
+            skip_hard: skip hard segmentation for-loops (pure soft, faster)
 
         Returns:
             logits:  [B, T, vocab_size]
-            metrics: dict — includes differentiable compression_loss
+            metrics: dict
         """
         src_key_padding_mask = src == PAD_ID
-        expanded_soft, metrics = self.encode(src, src_key_padding_mask)
+        expanded_soft, metrics = self.encode(src, src_key_padding_mask, skip_hard=skip_hard)
         logits = self.decode(expanded_soft, src_key_padding_mask)
         return logits, metrics
 

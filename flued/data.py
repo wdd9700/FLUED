@@ -126,6 +126,58 @@ class ByteReconstructionDataset(Dataset):
 ByteTextDataset = ByteReconstructionDataset
 
 
+class StreamingReconstructionDataset(torch.utils.data.IterableDataset):
+    """mmap-based streaming dataset for arbitrarily large corpora.
+
+    Randomly samples byte chunks from the raw file via memory-mapping.
+    Each worker independently mmaps the file and generates infinite
+    random chunks — no full-file load into RAM, no pre-processing,
+    and DataLoader's ``num_workers`` provides natural async prefetch.
+
+    Returns ``(src, tgt)`` where both are PAD-offset byte-id tensors
+    of length ``seq_len`` (tgt = src shifted by 1, like causal LM data
+    but used for reconstruction here).
+    """
+
+    def __init__(
+        self,
+        file_path: str,
+        seq_len: int = 512,
+        samples_per_worker: int = 2000,
+        seed: int = 42,
+    ):
+        import os
+        super().__init__()
+        self.file_path = file_path
+        self.seq_len = seq_len
+        self.file_size = os.path.getsize(file_path)
+        self.samples_per_worker = samples_per_worker
+        self.seed = seed
+
+    def __iter__(self):
+        import mmap, random
+        worker_info = torch.utils.data.get_worker_info()
+        worker_seed = self.seed
+        if worker_info is not None:
+            worker_seed = self.seed + worker_info.id * 10000
+        rng = random.Random(worker_seed)
+
+        # Each worker opens its own mmap handle.
+        with open(self.file_path, "rb") as f:
+            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            max_start = max(0, self.file_size - self.seq_len - 2)
+            for _ in range(self.samples_per_worker):
+                start = rng.randint(0, max_start)
+                raw = mm[start : start + self.seq_len + 1]
+                if len(raw) < self.seq_len + 1:
+                    continue
+                # PAD-offset: byte b → b + 1 (0 = PAD)
+                buf = torch.frombuffer(bytearray(raw), dtype=torch.uint8).long() + 1
+                src = buf[:self.seq_len]
+                tgt = buf[1:self.seq_len + 1]
+                yield src, tgt
+
+
 class SimpleBPE:
     """Minimal byte-level BPE tokenizer for local baselines."""
 
