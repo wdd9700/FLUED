@@ -30,14 +30,14 @@ raw bytes [B, T]
     └──────────┬──────────┘
                │
                ▼
-          byte logits [B, T, 257]
+          byte logits [B, T, 258]
 ```
 
 ### Key Components
 
 | Component | Description | Params |
 |-----------|-------------|--------|
-| Embedding | 257-token vocab (256 bytes + PAD) | 263K |
+| Embedding | 258-token vocab (256 bytes + PAD + MASK) | 264K |
 | Transformer | 24 tied blocks, d=1024, nhead=16, FFN=4096 | ~302M |
 | boundary_head | Linear(1024→1), operates on hidden state deltas | 1K |
 | Soft assignment | A[b,i,j] = P(pos i belongs to segment starting at j) | — |
