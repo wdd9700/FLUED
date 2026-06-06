@@ -1,16 +1,17 @@
 """
-FLUED E1 Stage A Runner — DSC reconstruction validation.
+FLUED E1 Stage A Runner — DSC denoising reconstruction validation.
 
 Goal
 ----
-Verify that FLUEDAutoencoder can compress a byte sequence into dynamic
-semantic units and reconstruct the original input with high accuracy.
+Verify that FLUEDAutoencoder can compress a clean or corrupted byte sequence
+into dynamic semantic units and reconstruct the clean input.
 
-    x  →  DSC(x)  →  DSC⁻¹(Z, spans)  →  x̂
-    loss = CrossEntropy(x̂, x)
+    clean x -> corrupt spans with MASK_ID -> DSC(x_corrupt) -> DSC⁻¹(Z, spans) -> x̂
+    loss = CrossEntropy(x̂, x_clean) + boundary losses + optional latent consistency
 
-E1 does NOT test generation or downstream tasks.  It only tests whether
-the tied-weight inverse can faithfully reconstruct the encoder's input.
+E1 does NOT test generation or downstream tasks.  It tests whether the
+tied-weight inverse can recover clean bytes while the encoder is forced to
+use context under span corruption.
 
 Usage
 -----
@@ -56,6 +57,39 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger("flued.e1")
+
+
+def corrupt_byte_inputs(
+    src: torch.Tensor,
+    valid_mask: torch.Tensor,
+    mask_id: int,
+    corrupt_rate: float,
+    span_mask_prob: float,
+    span_min: int,
+    span_max: int,
+) -> torch.Tensor:
+    corrupted = src.clone()
+    if corrupt_rate <= 0:
+        return corrupted
+
+    bsz, _ = src.shape
+    span_min = max(1, span_min)
+    span_max = max(span_min, span_max)
+    for b in range(bsz):
+        valid_len = int(valid_mask[b].sum().item())
+        if valid_len <= 0:
+            continue
+        budget = max(1, int(valid_len * corrupt_rate))
+        while budget > 0:
+            if torch.rand((), device=src.device).item() < span_mask_prob:
+                span_len = int(torch.randint(span_min, span_max + 1, (), device=src.device).item())
+            else:
+                span_len = 1
+            span_len = min(span_len, valid_len, budget)
+            start = int(torch.randint(0, max(valid_len - span_len, 0) + 1, (), device=src.device).item())
+            corrupted[b, start : start + span_len] = mask_id
+            budget -= span_len
+    return corrupted
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +206,7 @@ def reconstruction_accuracy(logits: torch.Tensor, targets: torch.Tensor) -> floa
 def run_e1(args: argparse.Namespace) -> bool:
     """Execute E1 training loop.  Returns True if criteria are met."""
     from flued.data import ByteReconstructionDataset, StreamingReconstructionDataset, safe_train_eval_split
-    from flued.model import FLUEDAutoencoder
+    from flued.model import FLUEDAutoencoder, MASK_ID
 
     # --- Reproducibility ---
     seed: Optional[int] = getattr(args, "seed", None)
@@ -211,13 +245,16 @@ def run_e1(args: argparse.Namespace) -> bool:
         d_model=args.d_model,
         nhead=args.nhead,
         dim_feedforward=args.dim_feedforward,
+        swiglu_hidden=args.swiglu_hidden,
         num_layers=args.num_layers,
         max_seq_len=args.max_seq_len,
+        assignment_window=args.assignment_window,
         dropout=args.dropout,
         boundary_threshold=args.boundary_threshold,
         boundary_temperature=args.boundary_temperature,
         target_compression=args.target_compression,
         compression_weight=args.compression_weight,
+        min_boundary_units=args.min_boundary_units,
         lambda_var=args.lambda_var,
         lambda_entropy=args.lambda_entropy,
         lambda_utf8=args.lambda_utf8,
@@ -327,6 +364,19 @@ def run_e1(args: argparse.Namespace) -> bool:
             "scheduler": scheduler.state_dict(),
             "scaler": scaler.state_dict(),
             "amp_dtype": getattr(args, "amp_dtype", "bf16"),
+            "model_config": {
+                "vocab_size": model.vocab_size,
+                "d_model": args.d_model,
+                "nhead": args.nhead,
+                "dim_feedforward": args.dim_feedforward,
+                "swiglu_hidden": args.swiglu_hidden,
+                "num_layers": args.num_layers,
+                "max_seq_len": args.max_seq_len,
+                "assignment_window": args.assignment_window,
+                "target_compression": args.target_compression,
+                "compression_weight": args.compression_weight,
+                "min_boundary_units": args.min_boundary_units,
+            },
         }
         # Atomic save: write to temp first, then rename (avoids corruption on
         # disk-full or I/O errors that have crashed training twice at ckpt writes).
@@ -357,6 +407,8 @@ def run_e1(args: argparse.Namespace) -> bool:
     running_loss = 0.0
     running_recon_loss = 0.0
     running_comp_loss = 0.0
+    running_latent_loss = 0.0
+    running_denoise = 0.0
     running_acc = 0.0
     running_soft_mon = 0.0
     running_hard_mon = 0.0
@@ -393,6 +445,23 @@ def run_e1(args: argparse.Namespace) -> bool:
 
         src = src.to(device)
         # E1: tgt == src (reconstruction)
+        clean_src = src
+        pad_mask = clean_src == 0
+        valid_mask = ~pad_mask
+        use_denoise = torch.rand((), device=device).item() < args.denoise_prob
+        model_src = (
+            corrupt_byte_inputs(
+                clean_src,
+                valid_mask,
+                mask_id=MASK_ID,
+                corrupt_rate=args.corrupt_rate,
+                span_mask_prob=args.span_mask_prob,
+                span_min=args.span_min,
+                span_max=args.span_max,
+            )
+            if use_denoise
+            else clean_src
+        )
 
         # --- Entropy warmup: ramp lambda_entropy ---
         if entropy_warmup_steps > 0 and global_step < entropy_warmup_steps:
@@ -401,10 +470,26 @@ def run_e1(args: argparse.Namespace) -> bool:
             model.lambda_entropy = base_lambda_entropy
 
         with torch.autocast(device_type=device_str, dtype=amp_dtype, enabled=use_amp):
-            logits, metrics = model(src, skip_hard=True)
-            recon_loss = criterion(logits.view(-1, logits.size(-1)), src.view(-1))
+            logits, metrics = model(
+                model_src,
+                src_key_padding_mask=pad_mask,
+                boundary_src=clean_src,
+                skip_hard=True,
+            )
+            recon_loss = criterion(logits.view(-1, logits.size(-1)), clean_src.view(-1))
             comp_loss = metrics["compression_loss"]
-            loss = (recon_loss + comp_loss) / args.grad_accum_steps
+            latent_loss = logits.new_zeros(())
+            if args.latent_consistency_weight > 0 and use_denoise and valid_mask.any():
+                with torch.no_grad():
+                    clean_expanded, _ = model.encode(
+                        clean_src,
+                        pad_mask,
+                        boundary_src=clean_src,
+                        skip_hard=True,
+                    )
+                latent_loss = torch.nn.functional.mse_loss(metrics["expanded"][valid_mask], clean_expanded[valid_mask])
+            total_loss = recon_loss + comp_loss + args.latent_consistency_weight * latent_loss
+            loss = total_loss / args.grad_accum_steps
 
         if getattr(args, "debug_nan", False):
             bp = metrics["boundary_probs"].detach()
@@ -419,7 +504,7 @@ def run_e1(args: argparse.Namespace) -> bool:
             if torch.isnan(loss):
                 raise FloatingPointError(
                     f"[step {global_step}] loss is NaN "
-                    f"(recon={recon_loss.item():.4f}, comp={comp_loss.item():.4f})"
+                    f"(recon={recon_loss.item():.4f}, comp={comp_loss.item():.4f}, latent={latent_loss.item():.4f})"
                 )
 
         if use_amp and amp_dtype == torch.float16:
@@ -428,12 +513,14 @@ def run_e1(args: argparse.Namespace) -> bool:
             loss.backward()
 
         accum_steps += 1
-        running_loss += (recon_loss + comp_loss).item()
+        running_loss += total_loss.item()
         running_recon_loss += recon_loss.item()
         running_comp_loss += comp_loss.item()
-        running_acc += reconstruction_accuracy(logits.detach(), src)
+        running_latent_loss += latent_loss.item()
+        running_denoise += float(use_denoise)
+        running_acc += reconstruction_accuracy(logits.detach(), clean_src)
         running_soft_mon += metrics["soft_m_over_n"].item()
-        running_hard_mon += metrics["hard_m_over_n"].detach().item()
+        running_hard_mon += float(metrics["hard_m_over_n"])
         running_num_units += float(metrics["num_units"])
         _bp = metrics["boundary_probs"].detach()
         running_bp_mean += _bp.mean().item()
@@ -463,10 +550,12 @@ def run_e1(args: argparse.Namespace) -> bool:
             if scaler.get_scale() < scale_before:
                 skipped_steps += 1
                 # Undo this micro-batch's metrics (they won't be counted)
-                running_loss -= (recon_loss + comp_loss).item()
+                running_loss -= total_loss.item()
                 running_recon_loss -= recon_loss.item()
                 running_comp_loss -= comp_loss.item()
-                running_acc -= reconstruction_accuracy(logits.detach(), src)
+                running_latent_loss -= latent_loss.item()
+                running_denoise -= float(use_denoise)
+                running_acc -= reconstruction_accuracy(logits.detach(), clean_src)
                 running_soft_mon -= metrics["soft_m_over_n"].item()
                 running_hard_mon -= float(metrics["hard_m_over_n"])
                 running_num_units -= float(metrics["num_units"])
@@ -499,15 +588,16 @@ def run_e1(args: argparse.Namespace) -> bool:
             log_g = max(1, running_micro_count // args.grad_accum_steps)  # effective steps
             scaler_scale = scaler.get_scale() if (use_amp and amp_dtype == torch.float16) else 0.0
             logger.info(
-                "step=%5d  loss=%.4f  recon=%.4f  comp=%.4f  recon_acc=%.4f"
+                "step=%5d  loss=%.4f  recon=%.4f  comp=%.4f  latent=%.4f  recon_acc=%.4f"
                 "  soft_m/n=%.3f  hard_m/n=%.3f  units=%.1f"
                 "  bp_mean=%.3f  bp_std=%.3f  bhead_gnorm=%.4f  lr=%.2e"
-                "  skip=%d  scale=%.0f"
+                "  denoise=%.2f  skip=%d  scale=%.0f"
                 "  h@55=%.3f  h@60=%.3f  h@65=%.3f",
                 global_step,
                 running_loss / log_n,
                 running_recon_loss / log_n,
                 running_comp_loss / log_n,
+                running_latent_loss / log_n,
                 running_acc / log_n,
                 running_soft_mon / log_n,
                 running_hard_mon / log_n,
@@ -516,13 +606,14 @@ def run_e1(args: argparse.Namespace) -> bool:
                 running_bp_std / log_n,
                 running_grad_norm / log_g,
                 scheduler.get_last_lr()[0],
+                running_denoise / log_n,
                 skipped_steps,
                 scaler_scale,
                 running_hmn55 / log_n,
                 running_hmn60 / log_n,
                 running_hmn65 / log_n,
             )
-            running_loss = running_recon_loss = running_comp_loss = 0.0
+            running_loss = running_recon_loss = running_comp_loss = running_latent_loss = running_denoise = 0.0
             running_acc = running_soft_mon = running_hard_mon = 0.0
             running_num_units = running_bp_mean = running_bp_std = running_grad_norm = 0.0
             running_hmn55 = running_hmn60 = running_hmn65 = 0.0
@@ -623,13 +714,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--d-model", type=int, default=None)
     parser.add_argument("--nhead", type=int, default=None)
     parser.add_argument("--dim-feedforward", type=int, default=None)
+    parser.add_argument("--swiglu-hidden", type=int, default=None)
     parser.add_argument("--num-layers", type=int, default=None)
     parser.add_argument("--max-seq-len", type=int, default=None)
+    parser.add_argument("--assignment-window", type=int, default=None)
     parser.add_argument("--dropout", type=float, default=None)
     parser.add_argument("--boundary-threshold", type=float, default=0.5)
     parser.add_argument("--boundary-temperature", type=float, default=1.0)
     parser.add_argument("--target-compression", type=float, default=0.3)
     parser.add_argument("--compression-weight", type=float, default=0.1)
+    parser.add_argument("--min-boundary-units", type=float, default=1.0)
     parser.add_argument("--lambda-var",          type=float, default=0.0,
                         help="variance bonus weight (encourage bp spread)")
     parser.add_argument("--lambda-entropy",      type=float, default=0.0,
@@ -680,6 +774,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seq-len", type=int, default=None)
     parser.add_argument("--stride", type=int, default=None)
+    parser.add_argument("--denoise-prob", type=float, default=0.7)
+    parser.add_argument("--corrupt-rate", type=float, default=0.15)
+    parser.add_argument("--span-mask-prob", type=float, default=0.7)
+    parser.add_argument("--span-min", type=int, default=1)
+    parser.add_argument("--span-max", type=int, default=8)
+    parser.add_argument("--latent-consistency-weight", type=float, default=0.03)
 
     # AMP
     parser.add_argument("--amp", action="store_true", default=None)
@@ -733,7 +833,8 @@ def _parse_args() -> argparse.Namespace:
     # Final fallbacks
     for attr, val in [
         ("d_model", 64), ("nhead", 4), ("dim_feedforward", 128),
-        ("num_layers", 2), ("max_seq_len", 64), ("dropout", 0.0),
+        ("swiglu_hidden", None),
+        ("num_layers", 2), ("max_seq_len", 64), ("assignment_window", 128), ("dropout", 0.0),
         ("batch_size", 4), ("max_steps", 200), ("lr", 3e-4),
         ("warmup_steps", 20), ("grad_accum_steps", 1),
         ("device", "cpu"), ("seq_len", 32), ("stride", 16),

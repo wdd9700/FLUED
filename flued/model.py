@@ -3,20 +3,20 @@ FLUED v0.4 Autoencoder — Dynamic Semantic Compiler (DSC).
 
 Architecture
 ------------
-  src byte ids (PAD=0, byte b → id b+1, vocab_size=257)
+  src byte ids (PAD=0, byte b → id b+1, MASK=257, vocab_size=258)
     → Embedding + PositionalEncoding
-    → TiedTransformerBlock × num_layers          (DSC forward pass)
+    → TiedTransformerBlock × num_layers          (DSC forward pass; SDPA + SwiGLU)
     → BoundaryScorer  (delta-based hidden-state differences)
     → _compile_semantic_units:
-        soft path  → assignment matrix A → Z_soft = Aᵀ H → expanded = A Z_soft
+        soft path  → banded assignment matrix A → Z_soft = Aᵀ H → expanded = A Z_soft
         hard path  → threshold → spans → mean-pool Z_hard   (metrics only)
     → TiedTransformerBlock × num_layers reversed (DSC⁻¹ inverse pass)
     → F.linear(inv_hidden, embedding.weight)      (tied output projection)
-    → logits [B, T, 257]
+    → logits [B, T, 258]
 
 Key design decisions
 --------------------
-* PAD-offset byte encoding: PAD=0, byte 0→1, …, byte 255→256.
+* PAD-offset byte encoding: PAD=0, byte 0→1, …, byte 255→256, MASK=257.
   Avoids byte-0 / PAD-id collision from earlier versions.
 * Tied weights: encoder and inverse decoder share ALL parameters.
   Inverse is a first-order approximation: x ← x − F(x).
@@ -24,6 +24,14 @@ Key design decisions
   boundary_head receives gradients through both reconstruction loss and
   compression loss.  Hard segmentation is used only for metrics.
 * Compression loss: soft boundary density (differentiable) not hard m/n.
+
+.. warning::
+   ``assignment_window`` currently only SEMANTICALLY restricts segment
+   affiliation windows; the internal ``_soft_assignment()`` still constructs
+   a full ``[B, T, T]`` matrix and masks out-of-window positions.  This is
+   safe for T ≤ 512 but remains O(T²) in memory.  For T ≥ 2048, the
+   soft-assignment step MUST be refactored into a truly banded/streaming
+   computation (e.g. ``torch.as_strided`` + custom backward).
 """
 
 from __future__ import annotations
@@ -36,17 +44,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 PAD_ID: int = 0
-VOCAB_SIZE: int = 257  # PAD + 256 byte values
+BYTE_OFFSET: int = 1
+RAW_BYTE_VOCAB: int = 256
+MASK_ID: int = BYTE_OFFSET + RAW_BYTE_VOCAB
+VOCAB_SIZE: int = MASK_ID + 1  # PAD + 256 byte values + MASK
 
 
 def byte_to_id(b: int) -> int:
     """Map a raw byte value (0–255) to a token id (1–256)."""
-    return b + 1
+    return b + BYTE_OFFSET
 
 
 def id_to_byte(token_id: int) -> int:
     """Map a token id (1–256) to a raw byte value (0–255)."""
-    return token_id - 1
+    if token_id < BYTE_OFFSET or token_id >= MASK_ID:
+        raise ValueError(f"token id {token_id} is not a raw byte id")
+    return token_id - BYTE_OFFSET
 
 
 class PositionalEncoding(nn.Module):
@@ -55,15 +68,59 @@ class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 4096, dropout: float = 0.0) -> None:
         super().__init__()
         self.dropout = nn.Dropout(dropout)
-        pe = torch.zeros(max_len, d_model)
-        pos = torch.arange(max_len, dtype=torch.float).unsqueeze(1)
-        div = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model))
+        self.d_model = d_model
+        self.register_buffer("pe", self._build_pe(max_len), persistent=False)
+
+    def _build_pe(self, length: int) -> torch.Tensor:
+        pe = torch.zeros(length, self.d_model)
+        pos = torch.arange(length, dtype=torch.float).unsqueeze(1)
+        div = torch.exp(torch.arange(0, self.d_model, 2, dtype=torch.float) * (-math.log(10000.0) / self.d_model))
         pe[:, 0::2] = torch.sin(pos * div)
         pe[:, 1::2] = torch.cos(pos * div)
-        self.register_buffer("pe", pe.unsqueeze(0))  # [1, max_len, d_model]
+        return pe.unsqueeze(0)  # [1, max_len, d_model]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.size(1) > self.pe.size(1):
+            self.pe = self._build_pe(x.size(1)).to(device=x.device, dtype=x.dtype)
         return self.dropout(x + self.pe[:, : x.size(1)])
+
+
+class SDPAAttention(nn.Module):
+    """Exact self-attention using PyTorch scaled_dot_product_attention kernels."""
+
+    def __init__(self, d_model: int, nhead: int, dropout: float = 0.0) -> None:
+        super().__init__()
+        if d_model % nhead != 0:
+            raise ValueError(f"d_model={d_model} must be divisible by nhead={nhead}")
+        self.nhead = nhead
+        self.head_dim = d_model // nhead
+        self.dropout = dropout
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        bsz, seq_len, d_model = x.shape
+        q = self.q_proj(x).view(bsz, seq_len, self.nhead, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(bsz, seq_len, self.nhead, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(bsz, seq_len, self.nhead, self.head_dim).transpose(1, 2)
+        attn_mask = None
+        if key_padding_mask is not None:
+            attn_mask = ~key_padding_mask[:, None, None, :]
+        y = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout if self.training else 0.0,
+        )
+        y = y.transpose(1, 2).reshape(bsz, seq_len, d_model)
+        return self.out_proj(y)
 
 
 # ---------------------------------------------------------------------------
@@ -97,15 +154,14 @@ class TiedTransformerBlock(nn.Module):
         super().__init__()
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
-        self.attn = nn.MultiheadAttention(
-            d_model, nhead, dropout=dropout, batch_first=True
-        )
-        self.ff1 = nn.Linear(d_model, dim_feedforward)
-        self.ff2 = nn.Linear(dim_feedforward, d_model)
+        self.attn = SDPAAttention(d_model, nhead, dropout=dropout)
+        self.ff_gate = nn.Linear(d_model, dim_feedforward)
+        self.ff_value = nn.Linear(d_model, dim_feedforward)
+        self.ff_out = nn.Linear(dim_feedforward, d_model)
         self.ff_drop = nn.Dropout(dropout)
 
     def _ffn(self, x: torch.Tensor) -> torch.Tensor:
-        return self.ff2(self.ff_drop(F.gelu(self.ff1(x))))
+        return self.ff_out(self.ff_drop(F.silu(self.ff_gate(x)) * self.ff_value(x)))
 
     def forward_block(
         self,
@@ -114,8 +170,7 @@ class TiedTransformerBlock(nn.Module):
     ) -> torch.Tensor:
         """DSC forward: encode step."""
         n1 = self.norm1(x)
-        h = x + self.attn(n1, n1, n1, key_padding_mask=key_padding_mask,
-                          need_weights=False)[0]
+        h = x + self.attn(n1, key_padding_mask=key_padding_mask)
         h = h + self._ffn(self.norm2(h))
         return h
 
@@ -127,8 +182,7 @@ class TiedTransformerBlock(nn.Module):
         """DSC⁻¹ inverse (approximate): decode step."""
         h = x - self._ffn(self.norm2(x))
         n1 = self.norm1(h)
-        h = h - self.attn(n1, n1, n1, key_padding_mask=key_padding_mask,
-                          need_weights=False)[0]
+        h = h - self.attn(n1, key_padding_mask=key_padding_mask)
         return h
 
 
@@ -155,13 +209,16 @@ class FLUEDAutoencoder(nn.Module):
         d_model: int = 256,
         nhead: int = 8,
         dim_feedforward: int = 1024,
+        swiglu_hidden: Optional[int] = None,
         num_layers: int = 4,
         max_seq_len: int = 512,
+        assignment_window: int = 128,
         dropout: float = 0.0,
         boundary_threshold: float = 0.5,
         boundary_temperature: float = 1.0,
         target_compression: float = 0.3,
         compression_weight: float = 0.1,
+        min_boundary_units: float = 1.0,
         # Type-conditional boundary regularization (default 0 = disabled)
         lambda_var: float = 0.0,
         lambda_entropy: float = 0.0,
@@ -185,10 +242,13 @@ class FLUEDAutoencoder(nn.Module):
         super().__init__()
         self.vocab_size = vocab_size
         self.d_model = d_model
+        self.swiglu_hidden = swiglu_hidden if swiglu_hidden is not None else max(1, dim_feedforward * 3 // 4)
+        self.assignment_window = int(assignment_window)
         self.boundary_threshold = boundary_threshold
         self.boundary_temperature = max(boundary_temperature, 1e-3)
         self.target_compression = target_compression
         self.compression_weight = compression_weight
+        self.min_boundary_units = min_boundary_units
         self.lambda_var = lambda_var
         self.lambda_entropy = lambda_entropy
         self.lambda_utf8 = lambda_utf8
@@ -223,7 +283,7 @@ class FLUEDAutoencoder(nn.Module):
                 TiedTransformerBlock(
                     d_model=d_model,
                     nhead=nhead,
-                    dim_feedforward=dim_feedforward,
+                    dim_feedforward=self.swiglu_hidden,
                     dropout=dropout,
                 )
                 for _ in range(num_layers)
@@ -257,8 +317,8 @@ class FLUEDAutoencoder(nn.Module):
         Returns:
             Dict of bool masks [B, T], PAD positions already excluded.
         """
-        raw = src.long() - 1  # raw byte value; PAD → -1
-        valid = src != PAD_ID
+        raw = src.long() - 1  # raw byte value; PAD → -1, MASK → 256
+        valid = (src != PAD_ID) & (src != MASK_ID)
 
         is_cont     = valid & (raw >= 0x80) & (raw <= 0xBF)         # UTF-8 continuation
         is_alpha    = valid & (
@@ -304,7 +364,12 @@ class FLUEDAutoencoder(nn.Module):
         p_f32 = p.float()
         p_c = p_f32.clamp(eps, 1.0 - eps)
 
-        mean_loss    = self.compression_weight * (p_f32.mean() - self.target_compression) ** 2
+        valid_f = valid_mask.float()
+        valid_n = valid_f.sum(dim=1).clamp(min=1)
+        density = (boundary_probs.float() * valid_f).sum(dim=1) / valid_n
+        min_density = torch.full_like(valid_n, float(self.min_boundary_units)) / valid_n
+        target = torch.maximum(torch.full_like(density, self.target_compression), min_density).clamp(max=1.0)
+        mean_loss    = self.compression_weight * (density - target).pow(2).mean()
         var_loss     = -self.lambda_var * p_f32.var(unbiased=False)
         entropy_loss = self.lambda_entropy * (
             -(p_c * p_c.log() + (1.0 - p_c) * (1.0 - p_c).log())
@@ -411,11 +476,11 @@ class FLUEDAutoencoder(nn.Module):
         # Mask upper triangle: j > i is impossible
         # Use -1e4 (not -1e9) to stay well within fp32 range and avoid
         # softmax instability from extreme values.
-        upper = torch.triu(
-            torch.ones(T, T, dtype=torch.bool, device=p.device),
-            diagonal=1,
-        )
-        log_stay = log_stay.masked_fill(upper.unsqueeze(0), -1e4)
+        idx = torch.arange(T, device=p.device)
+        impossible = idx.view(1, -1) > idx.view(-1, 1)
+        if self.assignment_window > 0:
+            impossible = impossible | ((idx.view(-1, 1) - idx.view(1, -1)) > self.assignment_window)
+        log_stay = log_stay.masked_fill(impossible.unsqueeze(0), -1e4)
 
         # Add log(p[j]) broadcast over query-position dimension i
         log_bp = torch.log(p)                       # [B, T], already clamped
@@ -557,7 +622,7 @@ class FLUEDAutoencoder(nn.Module):
         else:
             # Soft-only: use cumsum(bp) for segment count
             soft_m = boundary_probs.sum(dim=1).mean().item()
-            hard_m_over_n = soft_m_over_n
+            hard_m_over_n = soft_m_over_n.item() if isinstance(soft_m_over_n, torch.Tensor) else float(soft_m_over_n)
             num_units = soft_m
             z_hard = z_soft  # placeholder
             spans = []
@@ -573,6 +638,7 @@ class FLUEDAutoencoder(nn.Module):
             "span_ids": torch.zeros(B, T, dtype=torch.long, device=hidden.device) if skip_hard else span_ids,
             "boundary_probs": boundary_probs,
             "compression_loss": compression_loss,
+            "expanded": expanded_soft,
             "z": z_hard,
             "hard_mn_sweep": sweep,
             **type_means,
@@ -588,6 +654,7 @@ class FLUEDAutoencoder(nn.Module):
         src: torch.Tensor,
         src_key_padding_mask: Optional[torch.Tensor] = None,
         skip_hard: bool = True,
+        boundary_src: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict]:
         """Encode byte ids to a differentiable soft-expanded latent.
 
@@ -596,6 +663,8 @@ class FLUEDAutoencoder(nn.Module):
             src_key_padding_mask: [B, T] bool (True = padding)
             skip_hard:            skip hard segmentation for-loops (faster, pure soft)
         """
+        if boundary_src is None:
+            boundary_src = src
         h = self.pos_enc(self.embedding(src))
         for block in self.blocks:
             h = block.forward_block(h, key_padding_mask=src_key_padding_mask)
@@ -604,7 +673,7 @@ class FLUEDAutoencoder(nn.Module):
         delta[:, 1:] = h[:, 1:] - h[:, :-1]
         boundary_scores = self.boundary_head(delta).squeeze(-1)
 
-        byte_types = self._classify_bytes(src)
+        byte_types = self._classify_bytes(boundary_src)
         return self._compile_semantic_units(h, boundary_scores, src_key_padding_mask, byte_types, skip_hard=skip_hard)
 
     def decode(
@@ -629,6 +698,8 @@ class FLUEDAutoencoder(nn.Module):
         src: torch.Tensor,
         tgt: Optional[torch.Tensor] = None,
         skip_hard: bool = True,
+        src_key_padding_mask: Optional[torch.Tensor] = None,
+        boundary_src: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict]:
         """Full autoencoder forward.
 
@@ -641,8 +712,11 @@ class FLUEDAutoencoder(nn.Module):
             logits:  [B, T, vocab_size]
             metrics: dict
         """
-        src_key_padding_mask = src == PAD_ID
-        expanded_soft, metrics = self.encode(src, src_key_padding_mask, skip_hard=skip_hard)
+        if src_key_padding_mask is None:
+            src_key_padding_mask = src == PAD_ID
+        if boundary_src is None:
+            boundary_src = tgt if tgt is not None else src
+        expanded_soft, metrics = self.encode(src, src_key_padding_mask, skip_hard=skip_hard, boundary_src=boundary_src)
         logits = self.decode(expanded_soft, src_key_padding_mask)
         return logits, metrics
 
