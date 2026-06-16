@@ -51,11 +51,17 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
+# Enable cuDNN auto-tuner for fixed-shape workloads (5-15% speedup on RTX 5080)
+torch.backends.cudnn.benchmark = True
+
 logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     level=logging.INFO,
+    stream=sys.stderr,
 )
+# Force line-buffered stderr so pipe (PowerShell tee) output is real-time
+sys.stderr.reconfigure(line_buffering=True)
 logger = logging.getLogger("flued.e1")
 
 
@@ -142,7 +148,7 @@ PRESETS: Dict[str, Dict] = {
         "max_steps": 10000,
         "lr": 3e-5,
         "warmup_steps": 500,
-        "grad_accum_steps": 16,
+        "grad_accum_steps": 12,
         "seq_len": 512,
         "stride": 256,
         "device": "cuda",
@@ -230,6 +236,8 @@ def run_e1(args: argparse.Namespace) -> bool:
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
     fh.setLevel(logging.INFO)
+    # Force line-buffered writes so log file is real-time readable
+    fh.stream.reconfigure(line_buffering=True)
     logger.addHandler(fh)
     logger.info("Log file: %s", log_path)
 
@@ -355,6 +363,34 @@ def run_e1(args: argparse.Namespace) -> bool:
     ckpt_dir: str = getattr(args, "ckpt_dir", "checkpoints")
     ckpt_every: int = getattr(args, "ckpt_every", 500)
 
+    def _prune_checkpoints(ckpt_dir: str, current_step: int, keep_every: int = 5000, keep_last: int = 5) -> None:
+        """Remove old step checkpoints, keeping: every-Nth + the most recent K."""
+        import glob as _glob
+        pattern = os.path.join(ckpt_dir, "e1_step*.pt")
+        existing = sorted(_glob.glob(pattern))
+        steps = []
+        for p in existing:
+            try:
+                s = int(os.path.basename(p).replace("e1_step", "").replace(".pt", ""))
+                steps.append((s, p))
+            except ValueError:
+                continue
+        steps.sort(key=lambda x: x[0])
+        keep = set()
+        for s, p in steps:
+            if s % keep_every == 0:
+                keep.add(p)
+        # keep last N (by step number)
+        for s, p in steps[-keep_last:]:
+            keep.add(p)
+        for s, p in steps:
+            if p not in keep:
+                try:
+                    os.remove(p)
+                    logger.info("Pruned old checkpoint: %s", os.path.basename(p))
+                except OSError:
+                    pass
+
     def _save_ckpt(step: int) -> None:
         os.makedirs(ckpt_dir, exist_ok=True)
         state = {
@@ -387,6 +423,8 @@ def run_e1(args: argparse.Namespace) -> bool:
             torch.save(state, tmp)
             os.replace(tmp, path)  # atomic on same filesystem
         logger.info("Checkpoint saved → %s + %s", latest_path, step_path)
+        # Auto-cleanup: keep only every-20000th step + last 2 checkpoints
+        _prune_checkpoints(ckpt_dir, step, keep_every=20000, keep_last=2)
 
     # --- Resume from checkpoint ---
     global_step = 0
@@ -779,7 +817,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--span-mask-prob", type=float, default=0.7)
     parser.add_argument("--span-min", type=int, default=1)
     parser.add_argument("--span-max", type=int, default=8)
-    parser.add_argument("--latent-consistency-weight", type=float, default=0.03)
+    parser.add_argument("--latent-consistency-weight", type=float, default=0.0)
 
     # AMP
     parser.add_argument("--amp", action="store_true", default=None)

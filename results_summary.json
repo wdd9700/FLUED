@@ -1,0 +1,74 @@
+{
+  "project": "FLUED — FLexible Unified Encoder-Decoder",
+  "version": "0.4",
+  "date": "2026-06-16",
+  "v2_a_class": {
+    "description": "E1 reconstruction stability with pure denoising (latent_consistency=0)",
+    "model": "d=1024, 24 tied layers, SwiGLU FFN, 328M params, seq_len=512",
+    "denoise_config": {
+      "denoise_prob": 0.7,
+      "corrupt_rate": 0.15,
+      "span_mask_prob": 0.7,
+      "span_min": 1,
+      "span_max": 8,
+      "method": "byte → MASK_ID=257"
+    },
+    "results": [
+      {"seed": 42, "eval_acc": 0.9991, "m_n": 0.470, "bp_std": 0.407, "cjk_bp": 0.122, "ascii_bp": 0.501, "utf8_bp": 0.667, "op_bp": 0.751, "digit_bp": 0.572, "units": 248.7},
+      {"seed": 123, "eval_acc": 0.9993, "m_n": 0.498, "bp_std": 0.391, "cjk_bp": 0.182, "ascii_bp": 0.493, "utf8_bp": 0.640, "op_bp": 0.751, "digit_bp": 0.562, "units": 256.8},
+      {"seed": 999, "eval_acc": 0.9996, "m_n": 0.491, "bp_std": 0.394, "cjk_bp": 0.092, "ascii_bp": 0.459, "utf8_bp": 0.665, "op_bp": 0.736, "digit_bp": 0.535, "units": 251.3}
+    ],
+    "aggregate": {"eval_acc": "0.9993 ± 0.0005", "m_n": "0.486 ± 0.028", "bp_std": "0.397 ± 0.016", "cjk_bp": "0.132 ± 0.090"}
+  },
+  "ablation_denoise": {
+    "description": "AB2: Denoise ratio sweep — how much noise does the model need?",
+    "base_config": "weight=0.1, max_steps=30000, seed=42",
+    "results": [
+      {"denoise_prob": 0.3, "eval_acc": 0.9987, "m_n": 0.496, "status": "complete"},
+      {"denoise_prob": 0.5, "eval_acc": 0.9992, "m_n": 0.495, "status": "complete"},
+      {"denoise_prob": 0.7, "eval_acc": 0.9991, "m_n": 0.470, "status": "baseline (seed=42, 50000 steps)"},
+      {"denoise_prob": 0.9, "eval_acc": 0.9997, "m_n": 0.527, "status": "complete"}
+    ],
+    "finding": "Denoise ratio 0.3–0.9 all achieve >0.9987 acc. Higher noise → higher m/n (less compression)."
+  },
+  "ablation_compression_weight_03": {
+    "description": "AB1: Compression target sweep with weight=0.3",
+    "base_config": "weight=0.3, max_steps=30000, seed=42, denoise=0.7",
+    "results": [
+      {"target_compression": 0.20, "eval_acc": 0.9992, "m_n": 0.486, "status": "complete"},
+      {"target_compression": 0.30, "eval_acc": null, "m_n": null, "status": "NaN at step 27700 (bhead_gnorm divergence)"},
+      {"target_compression": 0.45, "eval_acc": 0.9995, "m_n": 0.501, "status": "complete (outlier — survived NaN zone)"},
+      {"target_compression": 0.60, "eval_acc": null, "m_n": null, "status": "NaN at step 27100 (bhead_gnorm divergence)"}
+    ],
+    "finding": "weight=0.3 is too aggressive: tc≥0.30 triggers boundary head NaN around step 27000–28000."
+  },
+  "ablation_compression_weight_025": {
+    "description": "AB1: Compression target sweep with weight=0.25 (retry after w=0.3 NaN)",
+    "base_config": "weight=0.25, max_steps=30000, seed=42, denoise=0.7",
+    "results": [
+      {"target_compression": 0.30, "eval_acc": 0.9992, "m_n": 0.483, "status": "complete"},
+      {"target_compression": 0.60, "eval_acc": null, "m_n": null, "status": "running"}
+    ],
+    "finding": "weight=0.25 stabilizes tc=0.30 (passed step 27100 NaN zone)."
+  },
+  "key_hyperparams": {
+    "lambda_var": 0.5,
+    "lambda_entropy": 0.05,
+    "lambda_utf8": 0.02,
+    "lambda_type": 0.05,
+    "entropy_warmup_steps": 10000,
+    "lr": 3e-5,
+    "warmup_steps": 500,
+    "grad_accum_steps": 12,
+    "batch_size": 1,
+    "dropout": 0.0,
+    "amp": "bf16"
+  },
+  "environment": {
+    "python": "3.14.0",
+    "pytorch": "2.11.0+cu128",
+    "gpu": "RTX 5080 16GB",
+    "cuda": "13.2",
+    "os": "Windows"
+  }
+}

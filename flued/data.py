@@ -19,7 +19,8 @@ from torch.utils.data import DataLoader, Dataset, random_split
 
 PAD_ID = 0
 BYTE_OFFSET = 1
-BYTE_VOCAB_SIZE = 257  # PAD + 256 bytes
+MASK_ID = BYTE_OFFSET + 256
+BYTE_VOCAB_SIZE = MASK_ID + 1  # PAD + 256 bytes + MASK
 
 
 STUB_CORPUS: List[str] = [
@@ -46,9 +47,9 @@ def byte_ids_to_text(token_ids: Sequence[int]) -> str:
     """Decode PAD-offset byte ids back to text (ignores PAD ids)."""
     byte_values: List[int] = []
     for tid in token_ids:
-        if tid == PAD_ID:
+        if tid in (PAD_ID, MASK_ID):
             continue
-        if tid < BYTE_OFFSET or tid >= BYTE_VOCAB_SIZE:
+        if tid < BYTE_OFFSET or tid >= MASK_ID:
             raise ValueError(f"Invalid byte token id: {tid}")
         byte_values.append(tid - BYTE_OFFSET)
     return bytes(byte_values).decode("utf-8", errors="replace")

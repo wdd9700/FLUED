@@ -368,6 +368,58 @@ class StreamingTokenLMDataset(torch.utils.data.Dataset):
         return state
 
 
+class OnTheFlyTokenLMDataset(torch.utils.data.Dataset):
+    """Streaming BPE dataset without a full token-id cache.
+
+    Each item reads a raw byte window from the source file, decodes it with
+    replacement for partial UTF-8 boundaries, tokenizes that window, and pads
+    or truncates to seq_len + 1 tokens. This keeps disk use O(1), which matters
+    on AutoDL 50GB data disks where a full 22GB corpus plus BPE cache can fill
+    the volume.
+    """
+
+    def __init__(
+        self,
+        tokenizer,
+        data_path: str,
+        seq_len: int = 256,
+        stride: int = 128,
+        bytes_per_token: int = 6,
+    ):
+        self.tokenizer = tokenizer
+        self.data_path = data_path
+        self.seq_len = seq_len
+        self.stride = stride
+        self.file_size = os.path.getsize(data_path)
+        self.bytes_per_chunk = max((seq_len + 1) * bytes_per_token, 4096)
+        self.byte_stride = max(stride * bytes_per_token, 1024)
+        if self.file_size <= self.bytes_per_chunk:
+            self.n_chunks = 1
+        else:
+            self.n_chunks = max(1, (self.file_size - self.bytes_per_chunk) // self.byte_stride + 1)
+
+    def __len__(self):
+        return self.n_chunks
+
+    def __getitem__(self, idx):
+        start = min(idx * self.byte_stride, max(0, self.file_size - 1))
+        with open(self.data_path, "rb") as fh:
+            fh.seek(start)
+            raw = fh.read(self.bytes_per_chunk)
+        text = raw.decode("utf-8", errors="replace")
+        ids = self.tokenizer.encode(text).ids
+        if len(ids) < self.seq_len + 1 and start + self.bytes_per_chunk < self.file_size:
+            with open(self.data_path, "rb") as fh:
+                fh.seek(start + self.bytes_per_chunk)
+                text += fh.read(self.bytes_per_chunk).decode("utf-8", errors="replace")
+            ids = self.tokenizer.encode(text).ids
+        buf = torch.zeros(self.seq_len + 1, dtype=torch.long)
+        if ids:
+            ids_t = torch.tensor(ids[: self.seq_len + 1], dtype=torch.long)
+            buf[: ids_t.numel()] = ids_t
+        return buf[: self.seq_len], buf[1 : self.seq_len + 1]
+
+
 def _ids_to_uint32_bytes(ids):
     import struct
     return struct.pack(f"<{len(ids)}I", *ids)
@@ -549,6 +601,7 @@ def train(args):
     elif args.model == "blt":
         model = BLTDownstream(
             blt_ckpt=args.blt_ckpt, bytelm_ckpt=args.bytelm_ckpt,
+            entropy_theta=args.blt_entropy_theta,
             d_model=args.d_model, nhead=args.nhead,
             dim_feedforward=args.dim_feedforward,
             num_layers=args.num_layers, max_seq_len=args.max_seq_len,
@@ -638,10 +691,10 @@ def train(args):
         seq_len = args.max_seq_len
         stride = max(1, seq_len // 2)
         if streaming:
-            dataset = StreamingTokenLMDataset(tokenizer, args.data_path,
-                                              seq_len=seq_len, stride=stride)
-            logger.info("StreamingTokenLMDataset: cache=%s, %d chunks (mmap)",
-                        dataset.cache_path, len(dataset))
+            dataset = OnTheFlyTokenLMDataset(tokenizer, args.data_path,
+                                             seq_len=seq_len, stride=stride)
+            logger.info("OnTheFlyTokenLMDataset: file=%s, %d chunks (no disk cache)",
+                        args.data_path, len(dataset))
         else:
             texts = load_texts(args.data_path, args.max_lines) if args.data_path else ["hello world"]
             logger.info("Loaded %d lines", len(texts))
@@ -705,10 +758,13 @@ def train(args):
         }
         latest = os.path.join(ckpt_dir, f"{ckpt_prefix}_latest.pt")
         stepf  = os.path.join(ckpt_dir, f"{ckpt_prefix}_step{step:06d}.pt")
-        for path in (latest, stepf):
-            tmp = path + ".tmp"
+        tmp = latest + ".tmp"
+        torch.save(state, tmp)
+        os.replace(tmp, latest)
+        if getattr(args, "save_step_ckpts", False):
+            tmp = stepf + ".tmp"
             torch.save(state, tmp)
-            os.replace(tmp, path)
+            os.replace(tmp, stepf)
         logger.info("Checkpoint saved → %s", stepf)
 
     # --- Resume ---
@@ -750,6 +806,11 @@ def train(args):
         with torch.autocast(device.type, amp_dtype, enabled=use_amp):
             logits, seg_lens = model(src)
             loss = criterion(logits.view(-1, logits.size(-1)), tgt.view(-1)) / accum
+        metric_extra = seg_lens
+        target_byte_counts = (tgt != 0).sum().item()
+        if args.model in ("bpe", "public_tok") and hasattr(model, "token_byte_len"):
+            metric_extra = model.token_byte_len[tgt]
+            target_byte_counts = metric_extra.masked_fill(tgt == 0, 0).sum().item()
 
         if use_amp and amp_dtype == torch.float16:
             scaler.scale(loss).backward()
@@ -758,9 +819,9 @@ def train(args):
 
         grad_step += 1
         running_loss += loss.item() * accum
-        running_bpb += bits_per_byte(logits.detach(), tgt, seg_lens, vocab_size)
+        running_bpb += bits_per_byte(logits.detach(), tgt, metric_extra, vocab_size)
         # Track real byte count for throughput (non-pad targets)
-        running_bytes += (tgt != 0).sum().item()
+        running_bytes += target_byte_counts
 
         if grad_step < accum:
             continue
@@ -813,8 +874,13 @@ def train(args):
             with torch.autocast(device.type, amp_dtype, enabled=use_amp):
                 logits, seg_lens = model(src)
                 loss = criterion(logits.view(-1, logits.size(-1)), tgt.view(-1))
+            metric_extra = seg_lens
+            eval_bytes = (tgt != 0).sum().item()
+            if args.model in ("bpe", "public_tok") and hasattr(model, "token_byte_len"):
+                metric_extra = model.token_byte_len[tgt]
+                eval_bytes = metric_extra.masked_fill(tgt == 0, 0).sum().item()
             total_loss += loss.item()
-            total_bpb += bits_per_byte(logits, tgt, seg_lens, vocab_size)
+            total_bpb += bits_per_byte(logits, tgt, metric_extra, vocab_size)
             # KV cache: for byte-level models, seg_lens gives #segments;
             # for token-level, it's #tokens (each token = 1 KV slot)
             if seg_lens is not None:
@@ -826,7 +892,7 @@ def train(args):
                     total_kv_units += (tgt != 0).sum().item()
             else:
                 total_kv_units += (tgt != 0).sum().item()
-            total_eval_bytes += (tgt != 0).sum().item()
+            total_eval_bytes += eval_bytes
             n_eval += 1
 
     kv_per_1k = (total_kv_units / max(1, total_eval_bytes)) * 1000 if total_eval_bytes > 0 else 0
@@ -870,6 +936,8 @@ def parse_args():
     parser.add_argument("--flued-ckpt", default="checkpoints/e1_latest.pt")
     parser.add_argument("--blt-ckpt", default="checkpoints/blt_latest.pt")
     parser.add_argument("--bytelm-ckpt", default="checkpoints/bytel_m_latest.pt")
+    parser.add_argument("--blt-entropy-theta", type=float, default=0.3,
+                        help="Entropy threshold for BLT patch boundaries.")
     parser.add_argument("--tokenizer-path", default="checkpoints/bpe_tokenizer/tokenizer.json")
 
     # Training
@@ -893,6 +961,8 @@ def parse_args():
                         help="Directory to write e3_<model>_latest.pt + step ckpts.")
     parser.add_argument("--ckpt-every", type=int, default=1000,
                         help="Save a step checkpoint every N optimizer steps. Set 0 to disable.")
+    parser.add_argument("--save-step-ckpts", action="store_true",
+                        help="Also keep numbered step checkpoints. Latest is always saved.")
     parser.add_argument("--resume", default=None,
                         help="Path to an e3_<model>_*.pt to resume from (loads only trainable params).")
 

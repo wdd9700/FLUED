@@ -50,12 +50,15 @@ def build_model(model_cfg: ModelConfig) -> nn.Module:
             d_model=model_cfg.d_model,
             nhead=model_cfg.nhead,
             dim_feedforward=model_cfg.dim_feedforward,
+            swiglu_hidden=model_cfg.swiglu_hidden,
             num_layers=model_cfg.num_layers,
             max_seq_len=model_cfg.max_seq_len,
+            assignment_window=model_cfg.assignment_window,
             dropout=model_cfg.dropout,
             boundary_threshold=model_cfg.boundary_threshold,
             target_compression=model_cfg.target_compression,
             compression_weight=model_cfg.compression_weight,
+            min_boundary_units=model_cfg.min_boundary_units,
         )
 
     elif model_cfg.model_type == "bpe":

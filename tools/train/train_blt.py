@@ -223,9 +223,13 @@ def train(args):
         state = {"global_step": step, "model": model.state_dict(),
                  "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
                  "scaler": scaler.state_dict()}
-        torch.save(state, os.path.join(ckpt_dir, f"blt_step{step:05d}.pt"))
-        torch.save(state, os.path.join(ckpt_dir, "blt_latest.pt"))
-        logger.info("Checkpoint -> step=%d", step)
+        latest = os.path.join(ckpt_dir, "blt_latest.pt")
+        tmp = latest + ".tmp"
+        torch.save(state, tmp)
+        os.replace(tmp, latest)
+        if getattr(args, "save_step_ckpts", False):
+            torch.save(state, os.path.join(ckpt_dir, f"blt_step{step:05d}.pt"))
+        logger.info("Checkpoint -> step=%d latest=%s", step, latest)
 
     # --- Resume ---
     global_step = 0
@@ -357,6 +361,7 @@ def parse_args():
     parser.add_argument("--stride", type=int, default=None)
     parser.add_argument("--ckpt-dir", default="checkpoints")
     parser.add_argument("--ckpt-every", type=int, default=500)
+    parser.add_argument("--save-step-ckpts", action="store_true")
     parser.add_argument("--log-interval", type=int, default=50)
     parser.add_argument("--resume", default=None)
 

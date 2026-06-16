@@ -129,17 +129,36 @@ class FLUEDDownstream(nn.Module):
 
         # Load frozen FLUED — use checkpoint dimensions
         ckpt = torch.load(flued_ckpt, map_location="cpu", weights_only=False)
-        ckpt_d = ckpt["model"]["embedding.weight"].shape[1]
-        ckpt_ff = ckpt["model"]["blocks.0.ff1.weight"].shape[0]
-        ckpt_nhead = ckpt_d // 64
+        state = ckpt["model"]
+        cfg = ckpt.get("model_config", {})
+        ckpt_d = state["embedding.weight"].shape[1]
+        if "blocks.0.ff_gate.weight" in state:
+            ckpt_ff = cfg.get("dim_feedforward", 4096)
+            ckpt_swiglu = state["blocks.0.ff_gate.weight"].shape[0]
+        else:
+            ckpt_ff = state["blocks.0.ff1.weight"].shape[0]
+            ckpt_swiglu = None
+        ckpt_nhead = cfg.get("nhead", ckpt_d // 64)
+        ckpt_layers = cfg.get(
+            "num_layers",
+            len({k.split(".")[1] for k in state if k.startswith("blocks.")}),
+        )
 
         self.encoder = FLUEDAutoencoder(
-            d_model=ckpt_d, nhead=ckpt_nhead, dim_feedforward=ckpt_ff,
-            num_layers=24, max_seq_len=512, dropout=0.0,
+            d_model=ckpt_d,
+            nhead=ckpt_nhead,
+            dim_feedforward=ckpt_ff,
+            swiglu_hidden=ckpt_swiglu,
+            num_layers=ckpt_layers,
+            max_seq_len=cfg.get("max_seq_len", 512),
+            assignment_window=cfg.get("assignment_window", 128),
+            min_boundary_units=cfg.get("min_boundary_units", 1.0),
+            dropout=0.0,
             lambda_var=0.5, lambda_entropy=0.05, lambda_utf8=0.02, lambda_type=0.05,
-            compression_weight=0.1, target_compression=0.3,
+            compression_weight=cfg.get("compression_weight", 0.1),
+            target_compression=cfg.get("target_compression", 0.3),
         )
-        self.encoder.load_state_dict(ckpt["model"])
+        self.encoder.load_state_dict(state)
         for p in self.encoder.parameters():
             p.requires_grad = False
         self.encoder.eval()
@@ -281,6 +300,7 @@ class BLTDownstream(nn.Module):
         self,
         blt_ckpt: str,
         bytelm_ckpt: str,
+        entropy_theta: float = 0.3,
         d_model: int = 1024,
         local_d_model: int = 512,
         nhead: int = 16,
@@ -301,9 +321,13 @@ class BLTDownstream(nn.Module):
             nhead=cfg.get("nhead", 8),
             dim_feedforward=cfg.get("dim_feedforward", 2048),
             num_layers=cfg.get("num_layers", 4),
-            max_len=512, dropout=cfg.get("dropout", 0.0),
+            max_len=max_seq_len, dropout=cfg.get("dropout", 0.0),
         )
-        self.byte_lm.load_state_dict(lm_ckpt["model"])
+        lm_state = {
+            k: v for k, v in lm_ckpt["model"].items()
+            if not k.endswith("pos_enc.pe")
+        }
+        self.byte_lm.load_state_dict(lm_state, strict=False)
         for p in self.byte_lm.parameters():
             p.requires_grad = False
         self.byte_lm.eval()
@@ -339,11 +363,12 @@ class BLTDownstream(nn.Module):
             dim_feedforward=inferred_ff,
             global_layers=inferred_global_layers, decoder_layers=inferred_decoder_layers,
             local_lm=self.byte_lm, local_lm_d_model=local_d_model,
-            patch_mode="entropy", entropy_theta=3.5,
-            max_seq_len=512, dropout=0.0,
+            patch_mode="entropy", entropy_theta=entropy_theta,
+            max_seq_len=max_seq_len, dropout=0.0,
         )
         # Use strict=False because ByteLanguageModel's internal weights may
         # appear under both top-level (loaded above) and BLT.local_lm.* keys.
+        sd = {k: v for k, v in sd.items() if not k.endswith("pos_enc.pe")}
         missing, unexpected = self.blt.load_state_dict(sd, strict=False)
         if unexpected:
             _lg.getLogger("e3.blt_downstream").warning(
@@ -355,7 +380,7 @@ class BLTDownstream(nn.Module):
             p.requires_grad = False
         self.blt.eval()
         self.local_d_model = local_d_model
-        self.seg_threshold = 3.5  # entropy threshold
+        self.seg_threshold = entropy_theta
 
         # Projection from local d_model to global d_model (if needed)
         if local_d_model != d_model:

@@ -12,6 +12,7 @@ SIZE_CONFIGS: Dict[str, Dict[str, Any]] = {
         "d_model": 128,
         "nhead": 4,
         "dim_feedforward": 1024,
+        "swiglu_hidden": 1536,
         "num_encoder_layers": 4,
         "num_decoder_layers": 4,
         # FLUED v0.4 uses a single num_layers (tied enc+dec weights)
@@ -21,6 +22,7 @@ SIZE_CONFIGS: Dict[str, Dict[str, Any]] = {
         "d_model": 256,
         "nhead": 8,
         "dim_feedforward": 2048,
+        "swiglu_hidden": 1536,
         "num_encoder_layers": 8,
         "num_decoder_layers": 8,
         "num_layers": 8,
@@ -32,6 +34,7 @@ SIZE_CONFIGS: Dict[str, Dict[str, Any]] = {
         "d_model": 1024,
         "nhead": 16,
         "dim_feedforward": 4096,
+        "swiglu_hidden": 3072,
         "num_encoder_layers": 12,
         "num_decoder_layers": 12,
         "num_layers": 24,
@@ -47,13 +50,15 @@ class ModelConfig:
     d_model: int = 256
     nhead: int = 8
     dim_feedforward: int = 1024
+    swiglu_hidden: int = 1536
     num_encoder_layers: int = 4
     num_decoder_layers: int = 4
     dropout: float = 0.0          # E1 default: 0.0 (tied inverse is dropout-sensitive)
     max_seq_len: int = 512
+    assignment_window: int = 128
 
-    # Byte-level vocabulary — v0.4 PAD-offset encoding: PAD=0, byte b → b+1
-    vocab_size: int = 257
+    # Byte-level vocabulary — PAD=0, byte b → b+1, MASK=257
+    vocab_size: int = 258
 
     # ------- FLUED v0.4-specific -------
     # num_layers is the single depth parameter (encoder and decoder share weights)
@@ -64,6 +69,7 @@ class ModelConfig:
     target_compression: float = 0.3
     # Weight on the compression loss term
     compression_weight: float = 0.1
+    min_boundary_units: float = 1.0
 
     # ------- Legacy FLUED fields (ignored by FLUEDAutoencoder v0.4) -------
     shallow_layers: int = 2
@@ -120,8 +126,10 @@ def parse_args() -> Tuple[ModelConfig, TrainConfig]:
     parser.add_argument("--d-model", type=int, default=None)
     parser.add_argument("--nhead", type=int, default=None)
     parser.add_argument("--dim-feedforward", type=int, default=None)
+    parser.add_argument("--swiglu-hidden", type=int, default=None)
     parser.add_argument("--num-layers", type=int, default=None)
     parser.add_argument("--max-seq-len", type=int, default=256)
+    parser.add_argument("--assignment-window", type=int, default=128)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--token-vocab-size", type=int, default=8192)
 
@@ -152,6 +160,7 @@ def parse_args() -> Tuple[ModelConfig, TrainConfig]:
         model_type=args.model_type,
         size=args.size,
         max_seq_len=args.max_seq_len,
+        assignment_window=args.assignment_window,
         dropout=args.dropout,
         token_vocab_size=args.token_vocab_size,
     ).apply_size()
@@ -160,6 +169,7 @@ def parse_args() -> Tuple[ModelConfig, TrainConfig]:
         "d_model": args.d_model,
         "nhead": args.nhead,
         "dim_feedforward": args.dim_feedforward,
+        "swiglu_hidden": args.swiglu_hidden,
         "num_layers": args.num_layers,
     }
     for key, value in overrides.items():

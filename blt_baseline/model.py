@@ -24,7 +24,7 @@ Key differences from our earlier joint-training version:
 """
 
 import math
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
