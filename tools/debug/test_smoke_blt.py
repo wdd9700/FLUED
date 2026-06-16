@@ -52,7 +52,7 @@ def test_legacy_api():
 
 def test_e3_import():
     print("=== Test 4: E3 ablation imports ===")
-    from e3_ablation import (
+    from tools.analysis.e3_ablation import (
         AblationConfig, AblationResult, build_loss_ablations,
         build_compression_sweep, build_target_sweep,
     )

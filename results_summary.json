@@ -51,6 +51,59 @@
     ],
     "finding": "weight=0.25 stabilizes tc=0.30 (passed step 27100 NaN zone)."
   },
+  "d1_downstream_2048byte_100k": {
+    "description": "Fair downstream LM comparison with 2048 original-byte context budget and 100K training steps",
+    "date": "2026-06-13/2026-06-15",
+    "important_note": "Older fixed-token BPE runs are invalid for fair comparison because max_seq_len=2048 meant 2048 BPE tokens, not 2048 original bytes.",
+    "results": [
+      {
+        "model": "BPE-8K",
+        "steps": 100000,
+        "bpb": 0.8066,
+        "kv_per_1kb": 164.0,
+        "time_min": 147.8,
+        "log": "K:\\FLUED_archive\\cloud_5090_D1_20260610\\westc_100k_20260613\\d1_bpe_8k_2048byte_100k\\d1_bpe_8k_2048byte_100k.log",
+        "checkpoint": "K:\\FLUED_archive\\cloud_5090_D1_20260610\\westc_100k_20260613\\d1_bpe_8k_2048byte_100k\\e3_bpe_latest.pt"
+      },
+      {
+        "model": "BPE-16K",
+        "steps": 100000,
+        "bpb": 0.8165,
+        "kv_per_1kb": 149.1,
+        "time_min": 145.8,
+        "log": "K:\\FLUED_archive\\cloud_5090_D1_20260610\\westc_100k_20260613\\d1_bpe_16k_2048byte_100k\\d1_bpe_16k_2048byte_100k.log",
+        "checkpoint": "K:\\FLUED_archive\\cloud_5090_D1_20260610\\westc_100k_20260613\\d1_bpe_16k_2048byte_100k\\e3_bpe_latest.pt"
+      },
+      {
+        "model": "BPE-32K",
+        "steps": 100000,
+        "bpb": 0.8205,
+        "kv_per_1kb": 135.6,
+        "time_min": 150.1,
+        "log": "K:\\FLUED_archive\\cloud_5090_D1_20260610\\westc_100k_20260613\\d1_bpe_32k_2048byte_100k\\d1_bpe_32k_2048byte_100k.log",
+        "checkpoint": "K:\\FLUED_archive\\cloud_5090_D1_20260610\\westc_100k_20260613\\d1_bpe_32k_2048byte_100k\\e3_bpe_latest.pt"
+      },
+      {
+        "model": "FLUED-v2",
+        "steps": 100000,
+        "bpb": 0.8732,
+        "kv_per_1kb": 546.1,
+        "time_min": 1171.0,
+        "log": "K:\\FLUED_archive\\cloud_5090_D1_20260610\\westc_100k_20260613\\d1_flued_v2_2048byte_100k\\d1_flued_v2_2048byte_100k.log",
+        "checkpoint": "K:\\FLUED_archive\\cloud_5090_D1_20260610\\westc_100k_20260613\\d1_flued_v2_2048byte_100k\\e3_flued_latest.pt"
+      },
+      {
+        "model": "BLT theta=0.3",
+        "steps": 100000,
+        "bpb": 2.3996,
+        "kv_per_1kb": 554.9,
+        "time_min": 1019.8,
+        "log": "K:\\FLUED_archive\\cloud_5090_D1_20260610\\westd_blt_100k_20260614\\d1_blt_bpb_2048_theta03_100k\\d1_blt_bpb_2048_theta03_100k.log",
+        "checkpoint": "K:\\FLUED_archive\\cloud_5090_D1_20260610\\westd_blt_100k_20260614\\d1_blt_bpb_2048_theta03_100k\\e3_blt_latest.pt"
+      }
+    ],
+    "finding": "Current FLUED-v2 is stable but behind BPE-8K on BPB and much heavier in KV/1KB. The strongest current claim is stable differentiable byte-boundary learning, not BPE replacement."
+  },
   "key_hyperparams": {
     "lambda_var": 0.5,
     "lambda_entropy": 0.05,
@@ -62,7 +115,8 @@
     "grad_accum_steps": 12,
     "batch_size": 1,
     "dropout": 0.0,
-    "amp": "bf16"
+    "amp": "bf16",
+    "latent_consistency_weight": 0.0
   },
   "environment": {
     "python": "3.14.0",

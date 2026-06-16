@@ -45,13 +45,14 @@ Main changes:
   - `op`
   - `digit`
 - FFN changes from GELU MLP to SwiGLU.
-- Default `swiglu_hidden=1536`.
+- The active 300M-class v2 runs use `swiglu_hidden=3072`.
 - Self-attention uses PyTorch SDPA kernels.
 - Sinusoidal PE grows dynamically for longer sequences.
 - Soft assignment is banded with `assignment_window=128` by default.
 - Length-aware compression is retained:
   - `target = max(target_compression, min_boundary_units / valid_length)`
-- Latent consistency is retained as a training objective, not a model dependency.
+- Latent consistency remains implemented as an experimental objective, but is
+  disabled in the current stable v2 runs.
 - RMSNorm is intentionally not used.
 
 Core path:
@@ -89,7 +90,7 @@ corrupt_rate=0.15
 span_mask_prob=0.7
 span_min=1
 span_max=8
-latent_consistency_weight=0.03
+latent_consistency_weight=0.0
 ```
 
 Loss:
@@ -99,6 +100,12 @@ CE(model_input -> clean_target)
 + compression/type boundary loss
 + latent_consistency_weight * MSE(expanded_corrupt, stopgrad(expanded_clean))
 ```
+
+`latent_consistency_weight=0.03` was tested and rejected for the stable line:
+the mean squared error (MSE) term can dominate the total loss, push the
+boundary head toward nearly constant probabilities, destroy boundary
+differentiation, and cause reconstruction collapse. Keep it at `0.0` unless
+running an explicit ablation.
 
 ## Checkpoint Compatibility
 
@@ -136,7 +143,7 @@ conda run --no-capture-output -n soulvlm python -u -m flued.e1_stage_a `
   --max-seq-len 2048 `
   --seq-len 2048 `
   --stride 1024 `
-  --swiglu-hidden 1536 `
+  --swiglu-hidden 3072 `
   --assignment-window 128 `
   --target-compression 0.3 `
   --compression-weight 0.125 `
@@ -146,7 +153,7 @@ conda run --no-capture-output -n soulvlm python -u -m flued.e1_stage_a `
   --span-mask-prob 0.7 `
   --span-min 1 `
   --span-max 8 `
-  --latent-consistency-weight 0.03 `
+  --latent-consistency-weight 0.0 `
   --grad-accum-steps 16 `
   --amp --amp-dtype bf16 `
   --ckpt-every 2500
@@ -159,13 +166,16 @@ If memory is tight, reduce `--seq-len` to `1024` first. Keep the same architectu
 Short/local reconstruction remains the prerequisite. FLUED v2 extends length in stages:
 
 ```text
-S1: 512/1024/2048 denoising reconstruction
-S2: 2048 stable training with banded assignment
+S1: 512 denoising reconstruction with three-seed stability
+S2: mixed-length 512/1024/2048 denoising reconstruction
 S3: 4096 experiment with assignment_window=128 or 256
 S4: hierarchical/chunk FLUED only after 4096 is stable
 ```
 
-Do not switch to a separate sparse Transformer backbone before proving the banded assignment path. For FLUED, the first long-context bottleneck is the assignment matrix, not sinusoidal PE.
+Do not switch to a separate sparse Transformer backbone before proving the
+banded assignment path. For FLUED, the first long-context bottleneck is the
+assignment matrix, not sinusoidal PE. The current implementation masks a full
+`[B, T, T]` matrix, so it is not yet a true long-context implementation.
 
 ## Asset Map
 
@@ -195,29 +205,27 @@ K:\FLUED_backup
 Useful archive material:
 
 ```text
-K:\FLUED_archive\E_checkpoints\e3_flued_fair.log
-K:\FLUED_archive\E_checkpoints\e3_flued_fair_v2.log
-K:\FLUED_archive\E_checkpoints\e3_bpe_local.log
-K:\FLUED_archive\E_checkpoints\e3_blt_local.log
-K:\FLUED_archive\E_checkpoints\E2_COMPARISON_ARCHIVE.md
-K:\FLUED_archive\E_checkpoints\PAPER_NARRATIVE.md
+K:\FLUED_archive\cloud_5090_D1_20260610\westc_100k_20260613
+K:\FLUED_archive\cloud_5090_D1_20260610\westd_blt_100k_20260614
 ```
 
-These archives are for evidence and comparison only, not v2 resume.
+These archives contain the fair 2048-byte 100K D1 logs and latest checkpoints.
+Older `westc` / `westd` fixed-token BPE runs are historical only and should not
+be cited as fair 2048-byte results.
 
 ## Current Defaults
 
 ```text
 VOCAB_SIZE=258
 MASK_ID=257
-swiglu_hidden=1536
+swiglu_hidden=3072
 assignment_window=128
 target_compression=0.3
-compression_weight=0.125
+compression_weight=0.1
 min_boundary_units=1.0
 denoise_prob=0.7
 corrupt_rate=0.15
 span_mask_prob=0.7
-latent_consistency_weight=0.03
+latent_consistency_weight=0.0
 RMSNorm=disabled
 ```
