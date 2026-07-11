@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from argparse import Namespace
 
 import torch
 import torch.nn.functional as F
@@ -8,6 +9,7 @@ import torch.nn.functional as F
 from flued.data import text_to_byte_ids
 from flued.v34.model import FLUEDV34Probe, FLUEDV34ProbeConfig, SpanDecoder
 from flued.v34.rate_emit import MarginalCodingRateSelector, ReadoutEmitController
+from tools.train.v3_4.train_v34_pos_ar_probe import apply_boundary_curriculum
 
 
 def _tiny_model() -> FLUEDV34Probe:
@@ -183,3 +185,20 @@ def test_v34_uniform_budget_is_lossless_and_avoids_utf8_continuations() -> None:
     continuation = raw.ge(0x80) & raw.le(0xBF)
     assert not out.policy.hard_cut[continuation].any()
     assert out.chunks.pack_info["truncated_tokens"].sum().item() == 0
+
+
+def test_v34_boundary_curriculum_switches_once_at_requested_step() -> None:
+    model = _tiny_model()
+    model.config.boundary_mode = "uniform_budget"
+    model.coding_rate_selector.mode = "l2"
+    args = Namespace(
+        boundary_curriculum_switch_step=3,
+        boundary_curriculum_mode="marginal_rate_topk",
+        boundary_curriculum_coding_rate_mode="l2",
+    )
+    assert not apply_boundary_curriculum(model, args, 2)
+    assert model.config.boundary_mode == "uniform_budget"
+    assert apply_boundary_curriculum(model, args, 3)
+    assert model.config.boundary_mode == "marginal_rate_topk"
+    assert model.coding_rate_selector.mode == "l2"
+    assert not apply_boundary_curriculum(model, args, 4)

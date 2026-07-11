@@ -98,6 +98,16 @@
         "boundary_mode": "uniform_budget",
         "emit_rate_value_weight": 0.0
       }
+    },
+    {
+      "id": "uniform_to_l2_curriculum",
+      "overrides": {
+        "boundary_mode": "uniform_budget",
+        "boundary_coding_rate_mode": "l2",
+        "boundary_curriculum_switch_step": 3000,
+        "boundary_curriculum_mode": "marginal_rate_topk",
+        "boundary_curriculum_coding_rate_mode": "l2"
+      }
     }
   ]
 }

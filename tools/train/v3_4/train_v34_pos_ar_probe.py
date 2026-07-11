@@ -80,6 +80,20 @@ def build_model(args: argparse.Namespace) -> FLUEDV34Probe:
     )
 
 
+def apply_boundary_curriculum(model: FLUEDV34Probe, args: argparse.Namespace, step: int) -> bool:
+    """Switch boundary policy once while keeping the same model and optimizer."""
+    switch_step = int(getattr(args, "boundary_curriculum_switch_step", 0))
+    if switch_step <= 0 or step < switch_step:
+        return False
+    target_mode = getattr(args, "boundary_curriculum_mode", "marginal_rate_topk")
+    target_rate_mode = getattr(args, "boundary_curriculum_coding_rate_mode", "l2")
+    changed = model.config.boundary_mode != target_mode or model.coding_rate_selector.mode != target_rate_mode
+    model.config.boundary_mode = target_mode
+    model.config.coding_rate_mode = target_rate_mode
+    model.coding_rate_selector.mode = target_rate_mode
+    return changed
+
+
 def _ce(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     return F.cross_entropy(
         logits.float().reshape(-1, BYTE_VOCAB_SIZE),
@@ -529,7 +543,19 @@ def run(args: argparse.Namespace) -> dict:
         torch.cuda.reset_peak_memory_stats(device)
         torch.cuda.synchronize(device)
     start = time.perf_counter()
+    if apply_boundary_curriculum(model, args, start_step):
+        print(
+            f"[boundary-curriculum] resume in {model.config.boundary_mode}/"
+            f"{model.coding_rate_selector.mode} at step={start_step}",
+            flush=True,
+        )
     for step in range(start_step, args.max_steps):
+        if apply_boundary_curriculum(model, args, step):
+            print(
+                f"[boundary-curriculum] switch at step={step}: "
+                f"{model.config.boundary_mode}/{model.coding_rate_selector.mode}",
+                flush=True,
+            )
         optimizer.zero_grad(set_to_none=True)
         try:
             batch = next(train_iter)
@@ -547,7 +573,15 @@ def run(args: argparse.Namespace) -> dict:
         scheduler.step()
         if collect:
             elapsed = time.perf_counter() - start
-            row = {"step": step, "lr": optimizer.param_groups[0]["lr"], "grad": float(grad), "steps_per_sec": (step + 1) / max(elapsed, 1e-9), **metrics}
+            row = {
+                "step": step,
+                "lr": optimizer.param_groups[0]["lr"],
+                "grad": float(grad),
+                "steps_per_sec": (step + 1) / max(elapsed, 1e-9),
+                "boundary_mode": model.config.boundary_mode,
+                "boundary_coding_rate_mode": model.coding_rate_selector.mode,
+                **metrics,
+            }
             _append_jsonl(log_path, row)
             print(
                 f"step={step} loss={row['loss']:.4f} identity={row['identity_acc']:.3f} "
@@ -635,6 +669,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--boundary-coding-rate-epsilon", type=float, default=1.0)
     parser.add_argument("--boundary-coding-rate-temperature", type=float, default=0.15)
     parser.add_argument("--boundary-coding-rate-mode", choices=["exact", "l2"], default="exact")
+    parser.add_argument("--boundary-curriculum-switch-step", type=int, default=0)
+    parser.add_argument(
+        "--boundary-curriculum-mode",
+        choices=["threshold", "marginal_rate_topk", "uniform_budget"],
+        default="marginal_rate_topk",
+    )
+    parser.add_argument("--boundary-curriculum-coding-rate-mode", choices=["exact", "l2"], default="l2")
     parser.add_argument("--fixed-chunk-budget", type=int, default=0)
     parser.add_argument("--bytes-per-chunk-budget", type=int, default=16)
     parser.add_argument("--use-emit-controller", action=argparse.BooleanOptionalAction, default=False)

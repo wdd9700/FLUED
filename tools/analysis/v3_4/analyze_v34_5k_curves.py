@@ -49,6 +49,7 @@ GROUPS = {
         "exact_marginal_rate",
         "l2_marginal_rate",
         "uniform_boundaries",
+        "uniform_to_l2_curriculum",
     ],
 }
 
