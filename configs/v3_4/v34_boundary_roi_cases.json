@@ -1,0 +1,1198 @@
+{
+  "protocol": "v34_boundary_roi_fixed_cases",
+  "evaluation": {
+    "seq_len": 512,
+    "seed": 42,
+    "encoding": "UTF-8",
+    "notes": "固定文本，不从训练语料抽样；每个 pair_id 含 base 与轻微 perturbed variant，用于边界稳定性对比。"
+  },
+  "model": {
+    "d_model": 64,
+    "nhead": 4,
+    "ffn_dim": 128,
+    "segmentor_layers": 1,
+    "interpreter_layers": 1,
+    "memory_rank": 2,
+    "readout_vectors": 4,
+    "ar_hidden": 16,
+    "use_position": true,
+    "use_ar": true,
+    "use_structured_lookup": true,
+    "use_memory": true,
+    "use_logic_prior": true,
+    "use_boundary_bridge": false,
+    "boundary_mode": "threshold",
+    "boundary_coding_rate_dim": 16,
+    "boundary_coding_rate_epsilon": 1,
+    "boundary_coding_rate_temperature": 0.15,
+    "boundary_coding_rate_mode": "exact",
+    "fixed_chunk_budget": 0,
+    "bytes_per_chunk_budget": 16,
+    "use_emit_controller": true,
+    "emit_forward_mode": "hard_st",
+    "emit_initial_probability": 0.1,
+    "max_chunks": 32,
+    "max_span": 32,
+    "tau_cut": 0.9,
+    "tau_trans": 0.75,
+    "boundary_temperature": 0.15,
+    "noise_scale": 0
+  },
+  "cases": [
+    {
+      "id": "zh_semantic_01_base",
+      "pair_id": "zh_semantic_01",
+      "variant": "base",
+      "category": "中文",
+      "title": "中文语义段落（base）",
+      "tags": [
+        "中文",
+        "逻辑转折",
+        "长文本"
+      ],
+      "audit_targets": [
+        "观察逗号、分号、但是、因此附近的 signed confidence",
+        "确认中文多字节 continuation 不被 policy hard cut"
+      ],
+      "text": "边界评估不只关注切分数量，还要检查切分是否落在可解释的位置。模型应当区分一个语义片段的自然结束、句子之间的逻辑转折，以及仅仅因为预算耗尽而发生的强制边界。因此，本样本把原因、证据、限制和结论放在同一段中，便于人工对照。"
+    },
+    {
+      "id": "zh_semantic_01_perturbed",
+      "pair_id": "zh_semantic_01",
+      "variant": "perturbed",
+      "category": "中文",
+      "title": "中文语义段落（perturbed）",
+      "tags": [
+        "中文",
+        "逻辑转折",
+        "长文本",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "观察逗号、分号、但是、因此附近的 signed confidence",
+        "确认中文多字节 continuation 不被 policy hard cut"
+      ],
+      "text": "边界评估不只关注切分数量，还要检查切分是否落在可解释的位置。模型应当区分一个语义片段的自然结束、句子之间的逻辑转折，以及仅仅因为预算耗尽而发生的强制边界。所以，本样本把原因、证据、限制和结论放在同一段中，便于人工对照。"
+    },
+    {
+      "id": "zh_technical_01_base",
+      "pair_id": "zh_technical_01",
+      "variant": "base",
+      "category": "中文",
+      "title": "中文技术清单（base）",
+      "tags": [
+        "中文",
+        "实体密集",
+        "数字"
+      ],
+      "audit_targets": [
+        "审阅版本号、路径、参数名是否保持连续",
+        "比较数字/英文实体两侧的边界压力"
+      ],
+      "text": "实验对象包括 FLUED-v3.4、RoPE、small-AR、MarginalCodingRateSelector、ReadoutEmitController，以及 E:\\projects\\FLUED\\FLUED。配置使用 d_model=512、nhead=8、max_span=128、tau_cut=0.90、tau_trans=0.75；结果写入 outputs/v34_boundary_roi。"
+    },
+    {
+      "id": "zh_technical_01_perturbed",
+      "pair_id": "zh_technical_01",
+      "variant": "perturbed",
+      "category": "中文",
+      "title": "中文技术清单（perturbed）",
+      "tags": [
+        "中文",
+        "实体密集",
+        "数字",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "审阅版本号、路径、参数名是否保持连续",
+        "比较数字/英文实体两侧的边界压力"
+      ],
+      "text": "实验对象包括 FLUED-v3.4、RoPE、small-AR、MarginalCodingRateSelector、ReadoutEmitController，以及 E:\\projects\\FLUED\\FLUED。配置使用 d_model=512、nhead=8、max_span=128、tau_cut=0.90、tau_trans=0.75，结果写入 outputs/v34_boundary_roi。"
+    },
+    {
+      "id": "zh_long_structured_01_base",
+      "pair_id": "zh_long_structured_01",
+      "variant": "base",
+      "category": "中文",
+      "title": "结构化长样本（base）",
+      "tags": [
+        "长文本",
+        "实体密集",
+        "数字/公式",
+        "换行"
+      ],
+      "audit_targets": [
+        "覆盖多段落、列表、参数表和结论",
+        "统计自然边界与 max-span 边界的比例"
+      ],
+      "text": "实验假设 H1：更稳定的 signed confidence 会减少无意义切分。\n观测量：boundary_count、mean_chunk_bytes、readout_slots_per_byte、UTF-8 continuation violations。\n控制变量：seed=42；seq_len=512；max_chunks=32；max_span=32。\n结论模板：若 model boundary 与逻辑转折重合，记为可解释；若仅在 max_span 处出现，记为预算驱动；若落在 continuation byte，记为需要进一步排查。"
+    },
+    {
+      "id": "zh_long_structured_01_perturbed",
+      "pair_id": "zh_long_structured_01",
+      "variant": "perturbed",
+      "category": "中文",
+      "title": "结构化长样本（perturbed）",
+      "tags": [
+        "长文本",
+        "实体密集",
+        "数字/公式",
+        "换行",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "覆盖多段落、列表、参数表和结论",
+        "统计自然边界与 max-span 边界的比例"
+      ],
+      "text": "实验假设 H1：更稳定的 signed confidence 会减少无意义切分。\n观测量：boundary_count、mean_chunk_bytes、readout_slots_per_byte、UTF-8 continuation violations。\n控制变量：seed=42；seq_len=512；max_chunks=32；max_span=32。\n结论模板：若逻辑转折与 model boundary 重合，记为可解释；若仅在 max_span 处出现，记为预算驱动；若落在 continuation byte，记为需要进一步排查。"
+    },
+    {
+      "id": "zh_order_01_base",
+      "pair_id": "zh_order_01",
+      "variant": "base",
+      "category": "中文",
+      "title": "中文语序轻微变化（base）",
+      "tags": [
+        "中文",
+        "语序变化"
+      ],
+      "audit_targets": [
+        "比较主谓宾顺序变化后的边界稳定性",
+        "关注同一标点前后的 chunk 起点"
+      ],
+      "text": "编码器先读取字节，再形成片段，最后输出 readout。"
+    },
+    {
+      "id": "zh_order_01_perturbed",
+      "pair_id": "zh_order_01",
+      "variant": "perturbed",
+      "category": "中文",
+      "title": "中文语序轻微变化（perturbed）",
+      "tags": [
+        "中文",
+        "语序变化",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "比较主谓宾顺序变化后的边界稳定性",
+        "关注同一标点前后的 chunk 起点"
+      ],
+      "text": "编码器先读取字节，再形成 readout，最后输出片段。"
+    },
+    {
+      "id": "en_explanation_01_base",
+      "pair_id": "en_explanation_01",
+      "variant": "base",
+      "category": "英文",
+      "title": "English explanatory prose（base）",
+      "tags": [
+        "English",
+        "logic transition",
+        "punctuation"
+      ],
+      "audit_targets": [
+        "Inspect confidence around however, therefore, and semicolons",
+        "Check that repeated function words do not create arbitrary cuts"
+      ],
+      "text": "A boundary is useful only when it preserves a readable unit for the downstream reader. However, a high signed confidence is not the same as a probability of correctness; it is pressure toward a cut. Therefore the audit records both the model decision and the chunk builder's executable boundary."
+    },
+    {
+      "id": "en_explanation_01_perturbed",
+      "pair_id": "en_explanation_01",
+      "variant": "perturbed",
+      "category": "英文",
+      "title": "English explanatory prose（perturbed）",
+      "tags": [
+        "English",
+        "logic transition",
+        "punctuation",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "Inspect confidence around however, therefore, and semicolons",
+        "Check that repeated function words do not create arbitrary cuts"
+      ],
+      "text": "A boundary is useful only when it preserves a readable unit for the downstream reader. However, a high signed confidence is not the same as a probability of correctness: it is pressure toward a cut. Therefore the audit records both the model decision and the chunk builder's executable boundary."
+    },
+    {
+      "id": "en_long_01_base",
+      "pair_id": "en_long_01",
+      "variant": "base",
+      "category": "重复文本",
+      "title": "English repeated context（base）",
+      "tags": [
+        "English",
+        "重复文本",
+        "长文本"
+      ],
+      "audit_targets": [
+        "比较 repeated clause 的 confidence 是否稳定",
+        "检查接近 max_span 的位置是否出现强制边界"
+      ],
+      "text": "cache hit keeps the readout stable; cache hit keeps the readout stable; cache hit keeps the readout stable; cache hit keeps the readout stable; cache hit keeps the readout stable; cache hit keeps the readout stable; cache hit keeps the readout stable; cache hit keeps the readout stable."
+    },
+    {
+      "id": "en_long_01_perturbed",
+      "pair_id": "en_long_01",
+      "variant": "perturbed",
+      "category": "重复文本",
+      "title": "English repeated context（perturbed）",
+      "tags": [
+        "English",
+        "重复文本",
+        "长文本",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "比较 repeated clause 的 confidence 是否稳定",
+        "检查接近 max_span 的位置是否出现强制边界"
+      ],
+      "text": "cache hit keeps the readout stable; cache hit keeps the readout stable; cache hit keeps the readout stable; cache hit keeps the readout stable; cache hit keeps the readout stable; cache hit keeps the readout stable; cache hit keeps the readout steady; cache hit keeps the readout stable."
+    },
+    {
+      "id": "python_code_01_base",
+      "pair_id": "python_code_01",
+      "variant": "base",
+      "category": "代码",
+      "title": "Python code block（base）",
+      "tags": [
+        "代码",
+        "换行",
+        "标点"
+      ],
+      "audit_targets": [
+        "逐字节查看缩进、冒号、括号和换行附近的标记",
+        "确认 UTF-8 之外的 ASCII 代码结构也被保留"
+      ],
+      "text": "def update_cache(key: str, value: Tensor) -> None:\n    if key in memory_pool:\n        previous = memory_pool[key]\n        memory_pool[key] = value.detach()\n        return previous\n    memory_pool[key] = value\n    return None\n"
+    },
+    {
+      "id": "python_code_01_perturbed",
+      "pair_id": "python_code_01",
+      "variant": "perturbed",
+      "category": "代码",
+      "title": "Python code block（perturbed）",
+      "tags": [
+        "代码",
+        "换行",
+        "标点",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "逐字节查看缩进、冒号、括号和换行附近的标记",
+        "确认 UTF-8 之外的 ASCII 代码结构也被保留"
+      ],
+      "text": "def refresh_cache(key: str, value: Tensor) -> None:\n    if key in memory_pool:\n        previous = memory_pool[key]\n        memory_pool[key] = value.detach()\n        return previous\n    memory_pool[key] = value\n    return None\n"
+    },
+    {
+      "id": "sql_code_01_base",
+      "pair_id": "sql_code_01",
+      "variant": "base",
+      "category": "代码",
+      "title": "SQL and identifiers（base）",
+      "tags": [
+        "代码",
+        "实体密集",
+        "数字"
+      ],
+      "audit_targets": [
+        "观察 SELECT/FROM/WHERE 逻辑词和 snake_case 标识符",
+        "检查日期、阈值和比较符号附近边界"
+      ],
+      "text": "SELECT user_id, event_count, avg_latency_ms\nFROM telemetry_v34\nWHERE run_id = 'roi_20260712' AND event_count >= 128\n  AND status IN ('ready', 'review')\nORDER BY avg_latency_ms DESC;"
+    },
+    {
+      "id": "sql_code_01_perturbed",
+      "pair_id": "sql_code_01",
+      "variant": "perturbed",
+      "category": "代码",
+      "title": "SQL and identifiers（perturbed）",
+      "tags": [
+        "代码",
+        "实体密集",
+        "数字",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "观察 SELECT/FROM/WHERE 逻辑词和 snake_case 标识符",
+        "检查日期、阈值和比较符号附近边界"
+      ],
+      "text": "SELECT user_id, event_count, avg_latency_ms\nFROM telemetry_v34_archive\nWHERE run_id = 'roi_20260713' AND event_count >= 128\n  AND status IN ('ready', 'review')\nORDER BY avg_latency_ms DESC;"
+    },
+    {
+      "id": "json_code_01_base",
+      "pair_id": "json_code_01",
+      "variant": "base",
+      "category": "代码",
+      "title": "JSON configuration（base）",
+      "tags": [
+        "代码",
+        "JSON",
+        "数字/公式"
+      ],
+      "audit_targets": [
+        "检查引号、冒号、逗号与嵌套对象的局部顺序",
+        "比较数值 token 与文本 token 的 signed confidence"
+      ],
+      "text": "{\"boundary_mode\": \"marginal_rate_topk\", \"fixed_chunk_budget\": 12, \"bytes_per_chunk_budget\": 16, \"tau_cut\": 0.90, \"tau_trans\": 0.75, \"use_emit_controller\": true}"
+    },
+    {
+      "id": "json_code_01_perturbed",
+      "pair_id": "json_code_01",
+      "variant": "perturbed",
+      "category": "代码",
+      "title": "JSON configuration（perturbed）",
+      "tags": [
+        "代码",
+        "JSON",
+        "数字/公式",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "检查引号、冒号、逗号与嵌套对象的局部顺序",
+        "比较数值 token 与文本 token 的 signed confidence"
+      ],
+      "text": "{\"boundary_mode\": \"marginal_rate_topk\", \"fixed_chunk_budget\": 13, \"bytes_per_chunk_budget\": 16, \"tau_cut\": 0.90, \"tau_trans\": 0.75, \"use_emit_controller\": true}"
+    },
+    {
+      "id": "formula_math_01_base",
+      "pair_id": "formula_math_01",
+      "variant": "base",
+      "category": "数字/公式",
+      "title": "公式与不等式（base）",
+      "tags": [
+        "数字/公式",
+        "混合语言",
+        "标点"
+      ],
+      "audit_targets": [
+        "查看公式符号、上下标字符和 ASCII 运算符的边界行为",
+        "确认负号、等号、箭头不被误读为自然语言转折"
+      ],
+      "text": "设 signed confidence 为 c_t，硬切分条件为 c_t > τ_cut，逻辑转折条件为 τ_trans < c_t ≤ τ_cut。若 L=max_span，则 span_length ≤ L；当累计长度达到 L 时，ChunkBuilder 必须插入 forced boundary。"
+    },
+    {
+      "id": "formula_math_01_perturbed",
+      "pair_id": "formula_math_01",
+      "variant": "perturbed",
+      "category": "数字/公式",
+      "title": "公式与不等式（perturbed）",
+      "tags": [
+        "数字/公式",
+        "混合语言",
+        "标点",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "查看公式符号、上下标字符和 ASCII 运算符的边界行为",
+        "确认负号、等号、箭头不被误读为自然语言转折"
+      ],
+      "text": "设 signed confidence 为 c_t，硬切分条件为 c_t ≥ τ_cut，逻辑转折条件为 τ_trans < c_t < τ_cut。若 L=max_span，则 span_length < L；当累计长度达到 L 时，ChunkBuilder 必须插入 forced boundary。"
+    },
+    {
+      "id": "numeric_metrics_01_base",
+      "pair_id": "numeric_metrics_01",
+      "variant": "base",
+      "category": "数字/公式",
+      "title": "数字与指标串（base）",
+      "tags": [
+        "数字",
+        "实体密集",
+        "重复文本"
+      ],
+      "audit_targets": [
+        "比较连续小数、百分号、科学计数法与版本号",
+        "观察重复数字序列中的自然/强制边界"
+      ],
+      "text": "step=002500 -> step=005000; BPB=2.3996, PPL=18.42, rate=0.03125, delta=-0.004, accuracy=98.7%, checksum=sha256:9f4a2c1e; v3.4.0-rc1 repeats v3.4.0-rc1."
+    },
+    {
+      "id": "numeric_metrics_01_perturbed",
+      "pair_id": "numeric_metrics_01",
+      "variant": "perturbed",
+      "category": "数字/公式",
+      "title": "数字与指标串（perturbed）",
+      "tags": [
+        "数字",
+        "实体密集",
+        "重复文本",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "比较连续小数、百分号、科学计数法与版本号",
+        "观察重复数字序列中的自然/强制边界"
+      ],
+      "text": "step=002500 -> step=005000; BPB=2.3997, PPL=18.42, rate=0.03125, delta=-0.004, accuracy=98.7%, checksum=sha256:9f4a2c1e; v3.4.0-rc1 repeats v3.4.0-rc1."
+    },
+    {
+      "id": "entity_dense_01_base",
+      "pair_id": "entity_dense_01",
+      "variant": "base",
+      "category": "实体密集",
+      "title": "实体密集实验记录（base）",
+      "tags": [
+        "实体密集",
+        "中文",
+        "英文",
+        "数字"
+      ],
+      "audit_targets": [
+        "检查模型名、类名、文件名、路径和日期的连续性",
+        "不要把实体内部的连字符/下划线当作逻辑转折"
+      ],
+      "text": "Alethic Insight 在 2026-07-12 复核 FLUEDV34Probe、FLUEDV34ProbeConfig、FixedDualThresholdPolicy、ChunkBuilder、SpanDecoder，并对比 tools/analysis/v3_4/render_v34_boundary_roi.py。"
+    },
+    {
+      "id": "entity_dense_01_perturbed",
+      "pair_id": "entity_dense_01",
+      "variant": "perturbed",
+      "category": "实体密集",
+      "title": "实体密集实验记录（perturbed）",
+      "tags": [
+        "实体密集",
+        "中文",
+        "英文",
+        "数字",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "检查模型名、类名、文件名、路径和日期的连续性",
+        "不要把实体内部的连字符/下划线当作逻辑转折"
+      ],
+      "text": "Alethic Insight 在 2026-07-12 复核 FLUEDV34Probe、FLUEDV34ProbeConfig、FixedDualThresholdPolicy、ChunkBuilder、SpanDecoder，并对比 tools/analysis/v3_4/eval_v34_boundary_roi.py。"
+    },
+    {
+      "id": "mixed_language_01_base",
+      "pair_id": "mixed_language_01",
+      "variant": "base",
+      "category": "混合语言",
+      "title": "中英代码混合说明（base）",
+      "tags": [
+        "混合语言",
+        "中文",
+        "English",
+        "代码"
+      ],
+      "audit_targets": [
+        "审阅语言切换点、反引号、camelCase 与中文标点",
+        "比较 natural transition 和 UTF-8 continuation 的叠加显示"
+      ],
+      "text": "请在 `eval_v34_boundary_roi.py` 中记录 signed confidence；the renderer should show model boundary, logic transition, UTF-8 continuation, and forced max-span boundary separately。"
+    },
+    {
+      "id": "mixed_language_01_perturbed",
+      "pair_id": "mixed_language_01",
+      "variant": "perturbed",
+      "category": "混合语言",
+      "title": "中英代码混合说明（perturbed）",
+      "tags": [
+        "混合语言",
+        "中文",
+        "English",
+        "代码",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "审阅语言切换点、反引号、camelCase 与中文标点",
+        "比较 natural transition 和 UTF-8 continuation 的叠加显示"
+      ],
+      "text": "请在 `eval_v34_boundary_roi.py` 中记录 signed confidence, the renderer should show model boundary, logic transition, UTF-8 continuation, and forced max-span boundary separately。"
+    },
+    {
+      "id": "punctuation_newlines_01_base",
+      "pair_id": "punctuation_newlines_01",
+      "variant": "base",
+      "category": "标点/换行/UTF-8",
+      "title": "标点与换行压力（base）",
+      "tags": [
+        "标点",
+        "换行",
+        "空白"
+      ],
+      "audit_targets": [
+        "查看空格、tab、CRLF/LF、引号和括号的边界标记",
+        "确认热力图不会把换行吞掉"
+      ],
+      "text": "第一行：开始；第二行：继续。\n\n\t缩进后的第三行 (with parentheses) [and brackets] {plus braces}。\r\n最后一行……结束！"
+    },
+    {
+      "id": "punctuation_newlines_01_perturbed",
+      "pair_id": "punctuation_newlines_01",
+      "variant": "perturbed",
+      "category": "标点/换行/UTF-8",
+      "title": "标点与换行压力（perturbed）",
+      "tags": [
+        "标点",
+        "换行",
+        "空白",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "查看空格、tab、CRLF/LF、引号和括号的边界标记",
+        "确认热力图不会把换行吞掉"
+      ],
+      "text": "第一行：开始，第二行：继续。\n\n\t缩进后的第三行 (with parentheses) [and brackets] {plus braces}。\r\n最后一行……结束！"
+    },
+    {
+      "id": "utf8_cjk_01_base",
+      "pair_id": "utf8_cjk_01",
+      "variant": "base",
+      "category": "标点/换行/UTF-8",
+      "title": "UTF-8 中文与 emoji（base）",
+      "tags": [
+        "UTF-8",
+        "中文",
+        "emoji"
+      ],
+      "audit_targets": [
+        "人工确认每个多字节字符的 continuation 字节标记",
+        "检查 emoji、中文和 ASCII 邻接时的边界类别"
+      ],
+      "text": "中文字符：春江花月夜；日文：情報圧縮；한국어: 경계；emoji: 🚀🛰️🧪；组合符号：é、Å、你好。"
+    },
+    {
+      "id": "utf8_cjk_01_perturbed",
+      "pair_id": "utf8_cjk_01",
+      "variant": "perturbed",
+      "category": "标点/换行/UTF-8",
+      "title": "UTF-8 中文与 emoji（perturbed）",
+      "tags": [
+        "UTF-8",
+        "中文",
+        "emoji",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "人工确认每个多字节字符的 continuation 字节标记",
+        "检查 emoji、中文和 ASCII 邻接时的边界类别"
+      ],
+      "text": "中文字符：春江花月夜；日文：情報圧縮；한국어: 경계；emoji: 🚀🛰️🧫；组合符号：é、Å、你好。"
+    },
+    {
+      "id": "utf8_pressure_01_base",
+      "pair_id": "utf8_pressure_01",
+      "variant": "base",
+      "category": "标点/换行/UTF-8",
+      "title": "UTF-8 continuation 边界压力（base）",
+      "tags": [
+        "UTF-8",
+        "长文本",
+        "强制边界"
+      ],
+      "audit_targets": [
+        "让 max_span=32 的自动边界有机会接近中文 continuation",
+        "核对 policy hard_cut 与 forced max-span 的区别"
+      ],
+      "text": "天地玄黄，宇宙洪荒；日月盈昃，辰宿列张。寒来暑往，秋收冬藏；闰余成岁，律吕调阳。云腾致雨，露结为霜；金生丽水，玉出昆冈。"
+    },
+    {
+      "id": "utf8_pressure_01_perturbed",
+      "pair_id": "utf8_pressure_01",
+      "variant": "perturbed",
+      "category": "标点/换行/UTF-8",
+      "title": "UTF-8 continuation 边界压力（perturbed）",
+      "tags": [
+        "UTF-8",
+        "长文本",
+        "强制边界",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "让 max_span=32 的自动边界有机会接近中文 continuation",
+        "核对 policy hard_cut 与 forced max-span 的区别"
+      ],
+      "text": "天地玄黄，宇宙洪荒；日月盈昃，辰宿列张。寒来暑往，秋收冬藏；闰余成岁，律吕调阳。云腾致雨，露结为霜；金生丽水，玉出昆仑。"
+    },
+    {
+      "id": "repeat_token_01_base",
+      "pair_id": "repeat_token_01",
+      "variant": "base",
+      "category": "重复文本",
+      "title": "重复 token 稳定性（base）",
+      "tags": [
+        "重复文本",
+        "英文",
+        "数字"
+      ],
+      "audit_targets": [
+        "比较同一 token 在不同 chunk 位置的 confidence",
+        "观察重复文本对 readout budget 的影响"
+      ],
+      "text": "token token token token token token token token token token; boundary boundary boundary boundary boundary boundary; 16 16 16 16 16 16 16 16."
+    },
+    {
+      "id": "repeat_token_01_perturbed",
+      "pair_id": "repeat_token_01",
+      "variant": "perturbed",
+      "category": "重复文本",
+      "title": "重复 token 稳定性（perturbed）",
+      "tags": [
+        "重复文本",
+        "英文",
+        "数字",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "比较同一 token 在不同 chunk 位置的 confidence",
+        "观察重复文本对 readout budget 的影响"
+      ],
+      "text": "token token token token token token token token token; boundary boundary boundary boundary boundary boundary; 16 16 16 16 16 16 16 16."
+    },
+    {
+      "id": "short_edge_01_base",
+      "pair_id": "short_edge_01",
+      "variant": "base",
+      "category": "标点/换行/UTF-8",
+      "title": "短文本起点与终点（base）",
+      "tags": [
+        "短文本",
+        "边界起点"
+      ],
+      "audit_targets": [
+        "确认第一个有效 byte 必须形成可执行起点",
+        "检查只有一个短 chunk 时的 readout fallback"
+      ],
+      "text": "OK。"
+    },
+    {
+      "id": "short_edge_01_perturbed",
+      "pair_id": "short_edge_01",
+      "variant": "perturbed",
+      "category": "标点/换行/UTF-8",
+      "title": "短文本起点与终点（perturbed）",
+      "tags": [
+        "短文本",
+        "边界起点",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "确认第一个有效 byte 必须形成可执行起点",
+        "检查只有一个短 chunk 时的 readout fallback"
+      ],
+      "text": "OK!"
+    },
+    {
+      "id": "en_api_01_base",
+      "pair_id": "en_api_01",
+      "variant": "base",
+      "category": "英文",
+      "title": "English API contract（base）",
+      "tags": [
+        "English",
+        "API",
+        "逻辑转折"
+      ],
+      "audit_targets": [
+        "比较 must 与 should 的局部扰动",
+        "检查冒号和括号附近的 boundary 稳定性"
+      ],
+      "text": "The encoder must preserve byte order before the decoder reads the chunk. The API returns a readout and a confidence trace."
+    },
+    {
+      "id": "en_api_01_perturbed",
+      "pair_id": "en_api_01",
+      "variant": "perturbed",
+      "category": "英文",
+      "title": "English API contract（perturbed）",
+      "tags": [
+        "English",
+        "API",
+        "逻辑转折",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "比较 must 与 should 的局部扰动",
+        "检查冒号和括号附近的 boundary 稳定性"
+      ],
+      "text": "The encoder should preserve byte order before the decoder reads the chunk. The API returns a readout and a confidence trace."
+    },
+    {
+      "id": "en_transition_01_base",
+      "pair_id": "en_transition_01",
+      "variant": "base",
+      "category": "英文",
+      "title": "English transition pair（base）",
+      "tags": [
+        "English",
+        "logic transition",
+        "punctuation"
+      ],
+      "audit_targets": [
+        "只替换相邻连接词，比较逻辑转折标记",
+        "确认句号与分号不造成异常预算跳变"
+      ],
+      "text": "The first pass is local; the second pass is global. Nevertheless, both passes share the same byte offsets."
+    },
+    {
+      "id": "en_transition_01_perturbed",
+      "pair_id": "en_transition_01",
+      "variant": "perturbed",
+      "category": "英文",
+      "title": "English transition pair（perturbed）",
+      "tags": [
+        "English",
+        "logic transition",
+        "punctuation",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "只替换相邻连接词，比较逻辑转折标记",
+        "确认句号与分号不造成异常预算跳变"
+      ],
+      "text": "The first pass is local; the second pass is global. However, both passes share the same byte offsets."
+    },
+    {
+      "id": "code_variable_01_base",
+      "pair_id": "code_variable_01",
+      "variant": "base",
+      "category": "代码",
+      "title": "Code variable rename（base）",
+      "tags": [
+        "代码",
+        "变量改名",
+        "Python"
+      ],
+      "audit_targets": [
+        "仅改变变量名，比较其余 byte boundary 的稳定性",
+        "检查下划线和赋值符号的局部影响"
+      ],
+      "text": "def merge_units(left_units, right_units):\n    merged_units = left_units + right_units\n    return merged_units\n"
+    },
+    {
+      "id": "code_variable_01_perturbed",
+      "pair_id": "code_variable_01",
+      "variant": "perturbed",
+      "category": "代码",
+      "title": "Code variable rename（perturbed）",
+      "tags": [
+        "代码",
+        "变量改名",
+        "Python",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "仅改变变量名，比较其余 byte boundary 的稳定性",
+        "检查下划线和赋值符号的局部影响"
+      ],
+      "text": "def merge_units(lhs_units, rhs_units):\n    merged_units = lhs_units + rhs_units\n    return merged_units\n"
+    },
+    {
+      "id": "numeric_formula_02_base",
+      "pair_id": "numeric_formula_02",
+      "variant": "base",
+      "category": "数字/公式",
+      "title": "公式数字微扰（base）",
+      "tags": [
+        "数字/公式",
+        "边界阈值"
+      ],
+      "audit_targets": [
+        "替换一个阈值数字，观察符号邻域而非整段漂移",
+        "比较 >、≤ 和小数点附近的 boundary"
+      ],
+      "text": "cut_score = 0.90; transition_score = 0.75; keep if cut_score > transition_score."
+    },
+    {
+      "id": "numeric_formula_02_perturbed",
+      "pair_id": "numeric_formula_02",
+      "variant": "perturbed",
+      "category": "数字/公式",
+      "title": "公式数字微扰（perturbed）",
+      "tags": [
+        "数字/公式",
+        "边界阈值",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "替换一个阈值数字，观察符号邻域而非整段漂移",
+        "比较 >、≤ 和小数点附近的 boundary"
+      ],
+      "text": "cut_score = 0.91; transition_score = 0.75; keep if cut_score > transition_score."
+    },
+    {
+      "id": "metric_table_01_base",
+      "pair_id": "metric_table_01",
+      "variant": "base",
+      "category": "数字/公式",
+      "title": "Metric table pair（base）",
+      "tags": [
+        "数字/公式",
+        "表格",
+        "实体"
+      ],
+      "audit_targets": [
+        "替换一个结果值，检查列分隔符和小数点的稳定性",
+        "查看 BPB/PPL/accuracy 三类指标是否混切"
+      ],
+      "text": "run, BPB, PPL, accuracy\nv34-full, 0.8732, 18.42, 0.987\nv34-lite, 0.9120, 21.07, 0.964"
+    },
+    {
+      "id": "metric_table_01_perturbed",
+      "pair_id": "metric_table_01",
+      "variant": "perturbed",
+      "category": "数字/公式",
+      "title": "Metric table pair（perturbed）",
+      "tags": [
+        "数字/公式",
+        "表格",
+        "实体",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "替换一个结果值，检查列分隔符和小数点的稳定性",
+        "查看 BPB/PPL/accuracy 三类指标是否混切"
+      ],
+      "text": "run, BPB, PPL, accuracy\nv34-full, 0.8733, 18.42, 0.987\nv34-lite, 0.9120, 21.07, 0.964"
+    },
+    {
+      "id": "entity_path_01_base",
+      "pair_id": "entity_path_01",
+      "variant": "base",
+      "category": "实体密集",
+      "title": "Entity path replacement（base）",
+      "tags": [
+        "实体密集",
+        "路径",
+        "文件名"
+      ],
+      "audit_targets": [
+        "只替换一个目录名，比较路径分隔符附近的切分",
+        "不要把下划线和点号解释为逻辑转折"
+      ],
+      "text": "checkpoint: E:\\projects\\FLUED\\FLUED\\checkpoints\\v34\\full\\latest.pt"
+    },
+    {
+      "id": "entity_path_01_perturbed",
+      "pair_id": "entity_path_01",
+      "variant": "perturbed",
+      "category": "实体密集",
+      "title": "Entity path replacement（perturbed）",
+      "tags": [
+        "实体密集",
+        "路径",
+        "文件名",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "只替换一个目录名，比较路径分隔符附近的切分",
+        "不要把下划线和点号解释为逻辑转折"
+      ],
+      "text": "checkpoint: E:\\projects\\FLUED\\FLUED\\checkpoints\\v34\\probe\\latest.pt"
+    },
+    {
+      "id": "entity_model_01_base",
+      "pair_id": "entity_model_01",
+      "variant": "base",
+      "category": "实体密集",
+      "title": "Model entity replacement（base）",
+      "tags": [
+        "实体密集",
+        "模型名",
+        "版本"
+      ],
+      "audit_targets": [
+        "替换模型实体但保留句法骨架",
+        "比较 FLUEDV34Probe 与 FLUEDV34Codec 的边界稳定性"
+      ],
+      "text": "The report compares FLUEDV34Probe with FixedDualThresholdPolicy in v3.4."
+    },
+    {
+      "id": "entity_model_01_perturbed",
+      "pair_id": "entity_model_01",
+      "variant": "perturbed",
+      "category": "实体密集",
+      "title": "Model entity replacement（perturbed）",
+      "tags": [
+        "实体密集",
+        "模型名",
+        "版本",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "替换模型实体但保留句法骨架",
+        "比较 FLUEDV34Probe 与 FLUEDV34Codec 的边界稳定性"
+      ],
+      "text": "The report compares FLUEDV34Codec with FixedDualThresholdPolicy in v3.4."
+    },
+    {
+      "id": "repeat_zh_01_base",
+      "pair_id": "repeat_zh_01",
+      "variant": "base",
+      "category": "重复文本",
+      "title": "中文重复短句（base）",
+      "tags": [
+        "重复文本",
+        "中文",
+        "长文本"
+      ],
+      "audit_targets": [
+        "比较重复中文短句的 chunk 起点",
+        "检查一个词替换是否只产生局部变化"
+      ],
+      "text": "边界稳定很重要。边界稳定很重要。边界稳定很重要。边界稳定很重要。边界稳定很重要。"
+    },
+    {
+      "id": "repeat_zh_01_perturbed",
+      "pair_id": "repeat_zh_01",
+      "variant": "perturbed",
+      "category": "重复文本",
+      "title": "中文重复短句（perturbed）",
+      "tags": [
+        "重复文本",
+        "中文",
+        "长文本",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "比较重复中文短句的 chunk 起点",
+        "检查一个词替换是否只产生局部变化"
+      ],
+      "text": "边界稳定很重要。边界稳定很重要。边界稳定很重要。边界可靠很重要。边界稳定很重要。"
+    },
+    {
+      "id": "repeat_code_01_base",
+      "pair_id": "repeat_code_01",
+      "variant": "base",
+      "category": "重复文本",
+      "title": "Repeated code statement（base）",
+      "tags": [
+        "重复文本",
+        "代码",
+        "变量"
+      ],
+      "audit_targets": [
+        "比较重复赋值语句的 hard boundary",
+        "观察一次变量改名是否影响后续重复块"
+      ],
+      "text": "x = cache[key]\nx = cache[key]\nx = cache[key]\nx = cache[key]\n"
+    },
+    {
+      "id": "repeat_code_01_perturbed",
+      "pair_id": "repeat_code_01",
+      "variant": "perturbed",
+      "category": "重复文本",
+      "title": "Repeated code statement（perturbed）",
+      "tags": [
+        "重复文本",
+        "代码",
+        "变量",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "比较重复赋值语句的 hard boundary",
+        "观察一次变量改名是否影响后续重复块"
+      ],
+      "text": "x = cache[key]\nx = cache[key]\nx = store[key]\nx = cache[key]\n"
+    },
+    {
+      "id": "mixed_formula_01_base",
+      "pair_id": "mixed_formula_01",
+      "variant": "base",
+      "category": "混合语言",
+      "title": "Mixed formula note（base）",
+      "tags": [
+        "混合语言",
+        "中文",
+        "公式"
+      ],
+      "audit_targets": [
+        "比较中文解释与公式间的转折",
+        "确认 ASCII 运算符和中文 continuation 分层显示"
+      ],
+      "text": "当 c_t > 0.90 时 cut；otherwise keep the current chunk and continue reading。"
+    },
+    {
+      "id": "mixed_formula_01_perturbed",
+      "pair_id": "mixed_formula_01",
+      "variant": "perturbed",
+      "category": "混合语言",
+      "title": "Mixed formula note（perturbed）",
+      "tags": [
+        "混合语言",
+        "中文",
+        "公式",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "比较中文解释与公式间的转折",
+        "确认 ASCII 运算符和中文 continuation 分层显示"
+      ],
+      "text": "当 c_t > 0.91 时 cut；otherwise keep the current chunk and continue reading。"
+    },
+    {
+      "id": "mixed_entity_01_base",
+      "pair_id": "mixed_entity_01",
+      "variant": "base",
+      "category": "混合语言",
+      "title": "Mixed entity note（base）",
+      "tags": [
+        "混合语言",
+        "实体密集",
+        "英文"
+      ],
+      "audit_targets": [
+        "替换一个类名，保持中英句法不变",
+        "检查反引号与中文标点的邻接行为"
+      ],
+      "text": "请比较 `ChunkBuilder` 与 `SpanDecoder` 的 output；the byte offsets must remain inspectable。"
+    },
+    {
+      "id": "mixed_entity_01_perturbed",
+      "pair_id": "mixed_entity_01",
+      "variant": "perturbed",
+      "category": "混合语言",
+      "title": "Mixed entity note（perturbed）",
+      "tags": [
+        "混合语言",
+        "实体密集",
+        "英文",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "替换一个类名，保持中英句法不变",
+        "检查反引号与中文标点的邻接行为"
+      ],
+      "text": "请比较 `ChunkBuilder` 与 `ReadoutPool` 的 output；the byte offsets must remain inspectable。"
+    },
+    {
+      "id": "newline_spacing_01_base",
+      "pair_id": "newline_spacing_01",
+      "variant": "base",
+      "category": "标点/换行/UTF-8",
+      "title": "Space and newline pair（base）",
+      "tags": [
+        "空格",
+        "换行",
+        "UTF-8"
+      ],
+      "audit_targets": [
+        "只改变空格和换行，比较 chunk boundary 是否稳定",
+        "检查 tab、LF 和 CRLF 的 byte labels"
+      ],
+      "text": "alpha beta gamma\nnext line\twith tab\nend"
+    },
+    {
+      "id": "newline_spacing_01_perturbed",
+      "pair_id": "newline_spacing_01",
+      "variant": "perturbed",
+      "category": "标点/换行/UTF-8",
+      "title": "Space and newline pair（perturbed）",
+      "tags": [
+        "空格",
+        "换行",
+        "UTF-8",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "只改变空格和换行，比较 chunk boundary 是否稳定",
+        "检查 tab、LF 和 CRLF 的 byte labels"
+      ],
+      "text": "alpha  beta gamma\nnext line\twith tab\nend"
+    },
+    {
+      "id": "unicode_punctuation_01_base",
+      "pair_id": "unicode_punctuation_01",
+      "variant": "base",
+      "category": "标点/换行/UTF-8",
+      "title": "Unicode punctuation pair（base）",
+      "tags": [
+        "UTF-8",
+        "标点",
+        "中文"
+      ],
+      "audit_targets": [
+        "替换中文逗号为英文逗号",
+        "确认 punctuation 变化不会与 continuation 混淆"
+      ],
+      "text": "证据，结论；限制：待复核。"
+    },
+    {
+      "id": "unicode_punctuation_01_perturbed",
+      "pair_id": "unicode_punctuation_01",
+      "variant": "perturbed",
+      "category": "标点/换行/UTF-8",
+      "title": "Unicode punctuation pair（perturbed）",
+      "tags": [
+        "UTF-8",
+        "标点",
+        "中文",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "替换中文逗号为英文逗号",
+        "确认 punctuation 变化不会与 continuation 混淆"
+      ],
+      "text": "证据, 结论; 限制: 待复核."
+    },
+    {
+      "id": "zh_summary_01_base",
+      "pair_id": "zh_summary_01",
+      "variant": "base",
+      "category": "中文",
+      "title": "中文总结语序（base）",
+      "tags": [
+        "中文",
+        "语序变化",
+        "总结"
+      ],
+      "audit_targets": [
+        "交换两个分句顺序，比较逻辑转折位置",
+        "检查结论和限制的 chunk 对齐"
+      ],
+      "text": "结果稳定，但限制仍然存在；因此需要继续复核。"
+    },
+    {
+      "id": "zh_summary_01_perturbed",
+      "pair_id": "zh_summary_01",
+      "variant": "perturbed",
+      "category": "中文",
+      "title": "中文总结语序（perturbed）",
+      "tags": [
+        "中文",
+        "语序变化",
+        "总结",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "交换两个分句顺序，比较逻辑转折位置",
+        "检查结论和限制的 chunk 对齐"
+      ],
+      "text": "限制仍然存在，但结果稳定；因此需要继续复核。"
+    },
+    {
+      "id": "zh_entity_01_base",
+      "pair_id": "zh_entity_01",
+      "variant": "base",
+      "category": "中文",
+      "title": "中文实体替换（base）",
+      "tags": [
+        "中文",
+        "实体替换",
+        "版本"
+      ],
+      "audit_targets": [
+        "只替换版本实体，比较中文上下文的边界稳定性",
+        "观察连字符和数字的局部行为"
+      ],
+      "text": "本轮使用 FLUED-v3.4 checkpoint，并记录 CPU smoke 结果。"
+    },
+    {
+      "id": "zh_entity_01_perturbed",
+      "pair_id": "zh_entity_01",
+      "variant": "perturbed",
+      "category": "中文",
+      "title": "中文实体替换（perturbed）",
+      "tags": [
+        "中文",
+        "实体替换",
+        "版本",
+        "成对微扰"
+      ],
+      "audit_targets": [
+        "只替换版本实体，比较中文上下文的边界稳定性",
+        "观察连字符和数字的局部行为"
+      ],
+      "text": "本轮使用 FLUED-v3.5 checkpoint，并记录 CPU smoke 结果。"
+    }
+  ]
+}

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -65,6 +66,7 @@ def build_model(args: argparse.Namespace) -> FLUEDV34Probe:
             coding_rate_epsilon=getattr(args, "boundary_coding_rate_epsilon", 1.0),
             coding_rate_temperature=getattr(args, "boundary_coding_rate_temperature", 0.15),
             coding_rate_mode=getattr(args, "boundary_coding_rate_mode", "exact"),
+            boundary_blend_alpha=getattr(args, "boundary_blend_alpha", 1.0),
             fixed_chunk_budget=getattr(args, "fixed_chunk_budget", 0),
             bytes_per_chunk_budget=getattr(args, "bytes_per_chunk_budget", 16),
             use_emit_controller=getattr(args, "use_emit_controller", False),
@@ -81,15 +83,25 @@ def build_model(args: argparse.Namespace) -> FLUEDV34Probe:
 
 
 def apply_boundary_curriculum(model: FLUEDV34Probe, args: argparse.Namespace, step: int) -> bool:
-    """Switch boundary policy once while keeping the same model and optimizer."""
+    """Apply a hard switch or a fixed-budget uniform-to-rate score transition."""
     switch_step = int(getattr(args, "boundary_curriculum_switch_step", 0))
     if switch_step <= 0 or step < switch_step:
         return False
     target_mode = getattr(args, "boundary_curriculum_mode", "marginal_rate_topk")
     target_rate_mode = getattr(args, "boundary_curriculum_coding_rate_mode", "l2")
-    changed = model.config.boundary_mode != target_mode or model.coding_rate_selector.mode != target_rate_mode
-    model.config.boundary_mode = target_mode
+    transition_steps = int(getattr(args, "boundary_curriculum_transition_steps", 0))
+    old_mode = model.config.boundary_mode
+    if transition_steps > 0 and step < switch_step + transition_steps:
+        progress = (step - switch_step) / float(transition_steps)
+        alpha = 0.5 - 0.5 * math.cos(math.pi * progress)
+        active_mode = "uniform_l2_blend"
+    else:
+        alpha = 1.0
+        active_mode = target_mode
+    changed = old_mode != active_mode or model.coding_rate_selector.mode != target_rate_mode
+    model.config.boundary_mode = active_mode
     model.config.coding_rate_mode = target_rate_mode
+    model.config.boundary_blend_alpha = alpha
     model.coding_rate_selector.mode = target_rate_mode
     return changed
 
@@ -531,6 +543,11 @@ def run(args: argparse.Namespace) -> dict:
             "step": int(completed_step),
             "torch_rng_state": torch.get_rng_state(),
             "summary": summary or {},
+            "runtime_boundary_state": {
+                "mode": model.config.boundary_mode,
+                "coding_rate_mode": model.coding_rate_selector.mode,
+                "blend_alpha": float(model.config.boundary_blend_alpha),
+            },
         }
         if device.type == "cuda":
             payload["cuda_rng_state"] = torch.cuda.get_rng_state(device)
@@ -580,6 +597,7 @@ def run(args: argparse.Namespace) -> dict:
                 "steps_per_sec": (step + 1) / max(elapsed, 1e-9),
                 "boundary_mode": model.config.boundary_mode,
                 "boundary_coding_rate_mode": model.coding_rate_selector.mode,
+                "boundary_blend_alpha": float(model.config.boundary_blend_alpha),
                 **metrics,
             }
             _append_jsonl(log_path, row)
@@ -613,6 +631,9 @@ def run(args: argparse.Namespace) -> dict:
         "train_elapsed_sec": train_elapsed,
         "train_steps_per_sec": steps_run_this_process / max(train_elapsed, 1.0e-9),
         "train_peak_memory_gb": train_peak_memory_gb,
+        "final_boundary_mode": model.config.boundary_mode,
+        "final_boundary_coding_rate_mode": model.coding_rate_selector.mode,
+        "final_boundary_blend_alpha": float(model.config.boundary_blend_alpha),
         **{f"eval_{key}": value for key, value in eval_stats.items()},
     }
     payload = checkpoint_payload(args.max_steps, result)
@@ -664,15 +685,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-memory", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use-logic-prior", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use-boundary-bridge", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--boundary-mode", choices=["threshold", "marginal_rate_topk", "uniform_budget"], default="threshold")
+    parser.add_argument(
+        "--boundary-mode",
+        choices=["threshold", "marginal_rate_topk", "uniform_budget", "uniform_l2_blend"],
+        default="threshold",
+    )
     parser.add_argument("--boundary-coding-rate-dim", type=int, default=16)
     parser.add_argument("--boundary-coding-rate-epsilon", type=float, default=1.0)
     parser.add_argument("--boundary-coding-rate-temperature", type=float, default=0.15)
     parser.add_argument("--boundary-coding-rate-mode", choices=["exact", "l2"], default="exact")
+    parser.add_argument("--boundary-blend-alpha", type=float, default=1.0)
     parser.add_argument("--boundary-curriculum-switch-step", type=int, default=0)
+    parser.add_argument("--boundary-curriculum-transition-steps", type=int, default=0)
     parser.add_argument(
         "--boundary-curriculum-mode",
-        choices=["threshold", "marginal_rate_topk", "uniform_budget"],
+        choices=["threshold", "marginal_rate_topk", "uniform_budget", "uniform_l2_blend"],
         default="marginal_rate_topk",
     )
     parser.add_argument("--boundary-curriculum-coding-rate-mode", choices=["exact", "l2"], default="l2")

@@ -51,6 +51,7 @@ GROUPS = {
         "uniform_boundaries",
         "uniform_to_l2_curriculum",
     ],
+    "progressive_memory": ["progressive_memory_on", "progressive_memory_off"],
 }
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from argparse import Namespace
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -202,3 +203,77 @@ def test_v34_boundary_curriculum_switches_once_at_requested_step() -> None:
     assert model.config.boundary_mode == "marginal_rate_topk"
     assert model.coding_rate_selector.mode == "l2"
     assert not apply_boundary_curriculum(model, args, 4)
+
+
+def test_v34_boundary_curriculum_blends_scores_before_final_l2() -> None:
+    model = _tiny_model()
+    model.config.boundary_mode = "uniform_budget"
+    args = Namespace(
+        boundary_curriculum_switch_step=3,
+        boundary_curriculum_transition_steps=2,
+        boundary_curriculum_mode="marginal_rate_topk",
+        boundary_curriculum_coding_rate_mode="l2",
+    )
+    assert apply_boundary_curriculum(model, args, 3)
+    assert model.config.boundary_mode == "uniform_l2_blend"
+    assert model.config.boundary_blend_alpha == 0.0
+    assert not apply_boundary_curriculum(model, args, 4)
+    assert model.config.boundary_blend_alpha == pytest.approx(0.5)
+    assert apply_boundary_curriculum(model, args, 5)
+    assert model.config.boundary_mode == "marginal_rate_topk"
+    assert model.config.boundary_blend_alpha == 1.0
+
+
+def test_v34_zero_blend_matches_uniform_hard_boundaries() -> None:
+    model = _tiny_model().eval()
+    model.config.boundary_mode = "uniform_budget"
+    model.config.coding_rate_mode = "l2"
+    model.coding_rate_selector.mode = "l2"
+    ids = torch.tensor([text_to_byte_ids("中文 mixed bytes and ordered_words")])
+    with torch.no_grad():
+        uniform = model(ids).policy.hard_cut
+        model.config.boundary_mode = "uniform_l2_blend"
+        model.config.boundary_blend_alpha = 0.0
+        blended = model(ids).policy.hard_cut
+    assert torch.equal(uniform, blended)
+
+
+def test_v34_zero_blend_preserves_uniform_soft_bridge() -> None:
+    selector = MarginalCodingRateSelector(dim=8, rate_dim=4, mode="l2")
+    features = torch.randn(1, 12, 8)
+    valid = torch.ones(1, 12, dtype=torch.bool)
+    forbidden = torch.zeros_like(valid)
+    anchor = torch.zeros(1, 12)
+    anchor[:, [0, 4, 8]] = 1.0
+    out = selector(
+        features,
+        valid,
+        forbidden,
+        max_chunks=3,
+        fixed_chunks=3,
+        anchor_score=anchor,
+        blend_alpha=0.0,
+    )
+    assert torch.equal(out.hard_cut, anchor.bool())
+    assert torch.equal(out.soft_cut, anchor)
+
+
+def test_v34_coding_rate_budget_includes_mandatory_first_cut() -> None:
+    selector = MarginalCodingRateSelector(dim=8, rate_dim=4, mode="l2")
+    features = torch.randn(2, 12, 8)
+    valid = torch.ones(2, 12, dtype=torch.bool)
+    forbidden = torch.zeros_like(valid)
+    out = selector(features, valid, forbidden, max_chunks=5, fixed_chunks=3)
+    assert out.hard_cut[:, 0].all()
+    assert torch.equal(out.hard_cut.sum(dim=1), torch.tensor([3, 3]))
+
+
+def test_v34_coding_rate_single_chunk_budget_only_selects_first() -> None:
+    selector = MarginalCodingRateSelector(dim=8, rate_dim=4, mode="l2")
+    features = torch.randn(1, 12, 8)
+    valid = torch.ones(1, 12, dtype=torch.bool)
+    forbidden = torch.zeros_like(valid)
+    out = selector(features, valid, forbidden, max_chunks=5, fixed_chunks=1)
+    assert out.hard_cut.sum().item() == 1
+    assert out.hard_cut[0, 0]
+    assert out.soft_cut.sum().item() == 1.0

@@ -63,6 +63,8 @@ class MarginalCodingRateSelector(nn.Module):
         max_chunks: int,
         fixed_chunks: int = 0,
         bytes_per_chunk: int = 16,
+        anchor_score: torch.Tensor | None = None,
+        blend_alpha: float = 1.0,
     ) -> CodingRateSelection:
         marginal = self._marginal_rate(features)
         eligible = valid & ~forbidden
@@ -79,17 +81,37 @@ class MarginalCodingRateSelector(nn.Module):
         eligible_count = eligible.sum(dim=1)
         target = target.clamp(min=1, max=int(max_chunks)).minimum(eligible_count.clamp(min=1))
 
-        score = marginal.masked_fill(~eligible, torch.finfo(marginal.dtype).min)
+        eligible_extra = eligible & ~first_mask
+        extra_target = (target - 1).clamp(min=0)
+        score = marginal
+        alpha = 1.0
+        if anchor_score is not None:
+            alpha = min(max(float(blend_alpha), 0.0), 1.0)
+
+            def normalize(value: torch.Tensor) -> torch.Tensor:
+                weight = eligible_extra.to(value.dtype)
+                count = weight.sum(dim=1, keepdim=True).clamp(min=1.0)
+                mean = (value * weight).sum(dim=1, keepdim=True) / count
+                variance = ((value - mean).square() * weight).sum(dim=1, keepdim=True) / count
+                return (value - mean) / variance.sqrt().clamp(min=1.0e-5)
+
+            score = alpha * normalize(marginal) + (1.0 - alpha) * normalize(anchor_score.to(marginal.dtype))
+        score = score.masked_fill(~eligible_extra, torch.finfo(marginal.dtype).min)
         order = torch.argsort(score, dim=1, descending=True)
         rank = torch.empty_like(order)
         positions = torch.arange(score.size(1), device=score.device).view(1, -1).expand_as(order)
         rank.scatter_(1, order, positions)
-        hard = rank.lt(target.unsqueeze(1)) & eligible
+        hard = rank.lt(extra_target.unsqueeze(1)) & eligible_extra
         hard = hard | first_mask
 
         sorted_score = torch.gather(score, 1, order)
-        kth = torch.gather(sorted_score, 1, (target - 1).unsqueeze(1)).detach()
-        soft = torch.sigmoid((score - kth) / self.temperature) * eligible.float()
+        kth_index = (extra_target - 1).clamp(min=0)
+        kth = torch.gather(sorted_score, 1, kth_index.unsqueeze(1)).detach()
+        soft = torch.sigmoid((score - kth) / self.temperature) * eligible_extra.float()
+        soft = soft * extra_target.gt(0).unsqueeze(1).to(soft.dtype)
+        if anchor_score is not None:
+            anchor_soft = anchor_score.to(soft.dtype).clamp(min=0.0, max=1.0) * eligible_extra.float()
+            soft = (1.0 - alpha) * anchor_soft + alpha * soft
         soft = torch.where(first_mask, torch.ones_like(soft), soft)
         return CodingRateSelection(marginal, hard, soft, target)
 

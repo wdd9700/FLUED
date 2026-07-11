@@ -372,6 +372,7 @@ class FLUEDV34ProbeConfig:
     coding_rate_epsilon: float = 1.0
     coding_rate_temperature: float = 0.15
     coding_rate_mode: str = "exact"
+    boundary_blend_alpha: float = 1.0
     fixed_chunk_budget: int = 0
     bytes_per_chunk_budget: int = 16
     use_emit_controller: bool = False
@@ -465,6 +466,46 @@ class FLUEDV34Probe(nn.Module):
         overflow = (requested & ~executed).sum(dim=1)
         return executed, overflow
 
+    @staticmethod
+    def _uniform_budget_selection(
+        valid: torch.Tensor,
+        forbidden: torch.Tensor,
+        max_chunks: int,
+        bytes_per_chunk: int,
+        reference: torch.Tensor,
+    ) -> CodingRateSelection:
+        """Build evenly spaced lossless cuts for pretraining or score anchoring."""
+        valid_len = valid.sum(dim=1)
+        target = torch.div(
+            valid_len + bytes_per_chunk - 1,
+            bytes_per_chunk,
+            rounding_mode="floor",
+        ).clamp(min=1, max=max_chunks)
+        positions = torch.arange(valid.size(1), device=valid.device).view(1, -1).expand_as(valid)
+        groups = torch.div(
+            positions * target.unsqueeze(1),
+            valid_len.clamp(min=1).unsqueeze(1),
+            rounding_mode="floor",
+        ).clamp(max=max_chunks - 1)
+        candidates = torch.where(valid & ~forbidden, positions, torch.full_like(positions, valid.size(1)))
+        first_per_group = torch.full(
+            (valid.size(0), max_chunks), valid.size(1), device=valid.device, dtype=torch.long
+        )
+        first_per_group.scatter_reduce_(1, groups, candidates, reduce="amin", include_self=True)
+        hard = torch.zeros_like(valid)
+        b_idx, g_idx = torch.where(
+            torch.arange(max_chunks, device=valid.device).view(1, -1) < target.unsqueeze(1)
+        )
+        t_idx = first_per_group[b_idx, g_idx]
+        present = t_idx.lt(valid.size(1))
+        hard[b_idx[present], t_idx[present]] = True
+        return CodingRateSelection(
+            marginal_rate=reference.new_zeros(reference.shape),
+            hard_cut=hard,
+            soft_cut=hard.float(),
+            target_chunks=target,
+        )
+
     def encode(self, token_ids: torch.Tensor) -> V34ProbeOutput:
         c = self.config
         valid = token_ids.ne(PAD_ID)
@@ -491,7 +532,16 @@ class FLUEDV34Probe(nn.Module):
             aux={**policy.aux, "utf8_continuation_hard_guard": True},
         )
         coding_selection = None
-        if c.boundary_mode == "marginal_rate_topk":
+        if c.boundary_mode in {"marginal_rate_topk", "uniform_l2_blend"}:
+            anchor_score = None
+            if c.boundary_mode == "uniform_l2_blend":
+                anchor_score = self._uniform_budget_selection(
+                    valid,
+                    utf8_cont,
+                    c.max_chunks,
+                    c.bytes_per_chunk_budget,
+                    confidence,
+                ).hard_cut.float()
             coding_selection = self.coding_rate_selector(
                 h,
                 valid,
@@ -499,41 +549,17 @@ class FLUEDV34Probe(nn.Module):
                 c.max_chunks,
                 c.fixed_chunk_budget,
                 c.bytes_per_chunk_budget,
+                anchor_score=anchor_score,
+                blend_alpha=c.boundary_blend_alpha,
             )
             requested_hard_cut = coding_selection.hard_cut
             executable_hard_cut = requested_hard_cut
             cut_overflow = torch.zeros(token_ids.size(0), device=token_ids.device, dtype=torch.long)
         elif c.boundary_mode == "uniform_budget":
-            valid_len = valid.sum(dim=1)
-            target = torch.div(
-                valid_len + c.bytes_per_chunk_budget - 1,
-                c.bytes_per_chunk_budget,
-                rounding_mode="floor",
-            ).clamp(min=1, max=c.max_chunks)
-            positions = torch.arange(valid.size(1), device=valid.device).view(1, -1).expand_as(valid)
-            groups = torch.div(
-                positions * target.unsqueeze(1),
-                valid_len.clamp(min=1).unsqueeze(1),
-                rounding_mode="floor",
-            ).clamp(max=c.max_chunks - 1)
-            candidates = torch.where(valid & ~utf8_cont, positions, torch.full_like(positions, valid.size(1)))
-            first_per_group = torch.full(
-                (valid.size(0), c.max_chunks), valid.size(1), device=valid.device, dtype=torch.long
+            coding_selection = self._uniform_budget_selection(
+                valid, utf8_cont, c.max_chunks, c.bytes_per_chunk_budget, confidence
             )
-            first_per_group.scatter_reduce_(1, groups, candidates, reduce="amin", include_self=True)
-            requested_hard_cut = torch.zeros_like(valid)
-            b_idx, g_idx = torch.where(
-                torch.arange(c.max_chunks, device=valid.device).view(1, -1) < target.unsqueeze(1)
-            )
-            t_idx = first_per_group[b_idx, g_idx]
-            present = t_idx.lt(valid.size(1))
-            requested_hard_cut[b_idx[present], t_idx[present]] = True
-            coding_selection = CodingRateSelection(
-                marginal_rate=confidence.new_zeros(confidence.shape),
-                hard_cut=requested_hard_cut,
-                soft_cut=requested_hard_cut.float(),
-                target_chunks=target,
-            )
+            requested_hard_cut = coding_selection.hard_cut
             executable_hard_cut = requested_hard_cut
             cut_overflow = torch.zeros(token_ids.size(0), device=token_ids.device, dtype=torch.long)
         elif c.boundary_mode == "threshold":
@@ -634,6 +660,7 @@ class FLUEDV34Probe(nn.Module):
                 "cut_capacity_overflow": cut_overflow,
                 "marginal_coding_rate": coding_selection.marginal_rate if coding_selection is not None else confidence.new_zeros(confidence.shape),
                 "target_chunks": coding_selection.target_chunks if coding_selection is not None else chunks.chunk_mask.sum(dim=1),
+                "boundary_blend_alpha": confidence.new_tensor(float(c.boundary_blend_alpha)),
             },
         )
 
