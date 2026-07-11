@@ -7,4 +7,7 @@
 - 可视化；
 - 不含模型检查点、语料或本机环境缓存。
 
-当前公开归档：[v3.4 5K 消融](v3.4/5k_ablation/README.md)。
+当前公开归档：
+
+- [v3.4 5K 全组件消融](v3.4/5k_ablation/README.md)
+- [v3.4 20K 边界策略与 curriculum](v3.4/20k_rate_comparison/README.md)
