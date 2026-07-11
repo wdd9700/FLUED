@@ -3,9 +3,9 @@
 #
 # Usage: .\tools\launcher\run_ablations.ps1
 
-$Python = "C:\Python314\python.exe"
-Set-Location "E:\projects\FLUED\FLUED"
-$DataPath = "E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt"
+$Python = "python"
+Set-Location "."
+$DataPath = "data/corpus.txt"
 
 $env:OMP_NUM_THREADS = "4"
 $env:MKL_NUM_THREADS = "4"

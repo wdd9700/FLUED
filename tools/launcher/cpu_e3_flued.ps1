@@ -1,8 +1,8 @@
 # cpu_e3_flued.ps1 — E3 downstream LM on CPU (migrate to GPU later)
-$Python = "C:\Python314\python.exe"
-Set-Location "E:\projects\FLUED\FLUED"
+$Python = "python"
+Set-Location "."
 
-$DataPath = "E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt"
+$DataPath = "data/corpus.txt"
 $LogFile = "checkpoints/e3_cpu_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
 $env:OMP_NUM_THREADS = "8"

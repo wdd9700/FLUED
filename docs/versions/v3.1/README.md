@@ -1,0 +1,7 @@
+# FLUED v3.1
+
+- [`FLUED_V3_1_ARCHITECTURE_CN.md`](FLUED_V3_1_ARCHITECTURE_CN.md)：该版本的规范化架构说明。
+- [`FLUED_V3_1_REVIEW_AND_NEXT_STEPS.md`](FLUED_V3_1_REVIEW_AND_NEXT_STEPS.md)：实验复盘和决策。
+- [`FLUED_V3_1_SEGMENTAL_LATENT_WORKSPACE.md`](FLUED_V3_1_SEGMENTAL_LATENT_WORKSPACE.md)：完整设计推理记录。
+
+对应工具位于 `tools/*/v3_1/`；依赖的早期共享原型位于 `tools/*/v3_0/`。

@@ -14,7 +14,7 @@ while preserving reversible byte-level input/output behavior?
 
 FLUED is currently published as a research archive and architecture record.  It
 contains code, experiments, failed directions, corrected evaluation protocols,
-and the current v3.3 architecture proposal.
+and the current v3.4 implementation and ablation archive.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/)
@@ -36,9 +36,12 @@ Current defensible claims:
    still behind the BPE baselines on bits-per-byte.
 4. v3.2.1 strict masked-source training is the first FLUED v3-family result that
    clearly makes a small latent backbone outperform a byte baseline.
-5. v3.3 is the current architecture endpoint: a byte-to-latent decision interface
-   that separates segmentation, interpretation, backbone decision, memory, and
-   decoding.
+5. v3.4 implements parallel per-chunk memory, marginal coding-rate boundary
+   selection, structured byte lookup, and hard readout emission with real
+   backbone compaction.
+6. In the current 37M / 5K single-seed screen, the L2 marginal-rate variant is
+   the best observed balance between reconstruction, completion, and actual
+   latent count. This is a candidate, not a scaling claim.
 
 Non-claims:
 
@@ -60,9 +63,10 @@ Non-claims:
 | v3.2 | Factorized byte seed, memory-free boundary, memory-conditioned interpreter, causal memory branch | The architecture boundary became clearer, but memory did not show universal gain. |
 | v3.2.1 | Strict masked-source codec and paired backbone evaluation | Masked-source training produced the strongest validated latent-interface result. |
 | v3.3 | Byte-to-latent decision interface | Current architecture target for public documentation and future implementation. |
+| v3.4 | Parallel memory, marginal coding rate, position/AR probes, hard emit control | The 5K matrix identifies viable components and exposes unresolved compute-control dynamics. |
 
-See [docs/FLUED_RESEARCH_RETROSPECTIVE_CN.md](docs/FLUED_RESEARCH_RETROSPECTIVE_CN.md)
-for the full v1-v3.3 research narrative.
+See [docs/research/FLUED_RESEARCH_RETROSPECTIVE_CN.md](docs/research/FLUED_RESEARCH_RETROSPECTIVE_CN.md)
+for the full v1-v3.3 narrative; v3.4 evidence is indexed separately below.
 
 ## Key Results
 
@@ -135,69 +139,79 @@ v3.2.1 masked-source codec is the first route that clearly reduces the small
 backbone's masked-byte completion difficulty.
 ```
 
-## FLUED v3.3 Architecture
+## FLUED v3.4 Architecture
 
-FLUED v3.3 is the current stopping point for architecture documentation.  It is
-a byte-to-latent decision interface:
+v3.4 keeps FLUED as a reversible byte-to-latent interface while moving memory
+construction off the serial critical path:
 
 ```mermaid
-flowchart LR
-    A["Byte IDs"] --> B["Structured Byte Lookup"]
-    B --> C["Signed Boundary Segmentor"]
-    C --> D["Dual-Threshold Chunk Policy"]
-    D --> E["Chunk Builder"]
-    E --> F["One-shot Latent Interpreter"]
-    M["Causal Memory M_<t>"] --> F
-    F --> Z["z_content readout"]
-    F --> W["m_write for future chunks"]
-    W --> CM["Delayed Commit"]
-    CM --> M
-    Z --> G["External Latent Backbone"]
-    G --> P["Predicted / Completed Latent"]
-    P --> H["Shared Decoder"]
-    H --> I["Byte Distribution"]
+flowchart TD
+    A["Byte IDs"] --> B["Structured 16x16 Byte Lookup"]
+    B --> C["Contextual Signed Segmentor"]
+    C --> D["Hard Chunk Policy / Soft Gradient"]
+    D --> E["Chunk-local Byte States"]
+    E --> M["Parallel Per-chunk Memory Summaries"]
+    E --> F["One-shot Interpreter"]
+    M --> X["All Other Chunk Memories"]
+    X --> F
+    F --> R["1 Fallback + 15 Optional Readouts"]
+    R --> G["Hard Emit and Real Compaction"]
+    G --> H["External Latent Backbone"]
+    H --> I["Completed Readout Sequence"]
+    I --> J["Memory-free Tied Decoder"]
+    J --> K["Byte Distribution"]
 ```
 
 Main principles:
 
-1. Segmentor is lightweight and memory-free.
-2. Interpreter is the semantic byte-to-latent interface.
-3. Backbone makes decisions in latent space.
-4. Decoder translates latent back to bytes.
-5. Memory is causal and experimental: current chunk can read only past memory;
-   current memory writes are visible only to future chunks.
+1. Segmentation depends on the byte sequence, not memory.
+2. Each memory summarizes only its own chunk; memory generation is parallel.
+3. The interpreter may read other chunks' memories but never the current chunk's
+   memory, preventing the direct self-copy shortcut.
+4. Readout emit controls the number of latent vectors that actually enter the
+   backbone; the fallback readout is always retained.
+5. The decoder reverses byte-to-readout translation and does not consume memory.
 
-See [docs/FLUED_V3_3_ARCHITECTURE_CN.md](docs/FLUED_V3_3_ARCHITECTURE_CN.md)
-for the full public architecture document.
+See the [v3.4 implementation baseline](docs/versions/v3.4/FLUED_V3_4_IMPLEMENTATION_BASELINE_CN.md)
+and [5K ablation analysis](docs/versions/v3.4/FLUED_V3_4_5K_ABLATION_ANALYSIS_20260711_CN.md).
+
+### v3.4 5K Structural Screen
+
+| Variant | Reconstruction | Masked completion | Actual latent / byte | Reading |
+| --- | ---: | ---: | ---: | --- |
+| Exact marginal rate, full | 0.5970 | 0.1343 | 0.7852 | Stable boundaries, early suboptimal lock-in |
+| **L2 marginal rate** | **0.7041** | **0.1477** | **0.6804** | Current best balanced candidate |
+| Uniform boundaries | 0.9873 | 0.1485 | 0.9694 | Near-no-compression upper control |
+| Soft emit, no compaction | 0.6795 | 0.1334 | 1.0752 | Soft gates do not save backbone compute |
+
+All 17 raw logs and curve artifacts are published under
+[`results/v3.4/5k_ablation/`](results/v3.4/5k_ablation/README.md).
 
 ## Public Documentation Map
 
 | Document | Purpose |
 | --- | --- |
-| [docs/FLUED_RESEARCH_RETROSPECTIVE_CN.md](docs/FLUED_RESEARCH_RETROSPECTIVE_CN.md) | v1-v3.3 experiments, reasoning, failures, and iteration process |
-| [docs/FLUED_V3_3_ARCHITECTURE_CN.md](docs/FLUED_V3_3_ARCHITECTURE_CN.md) | Current final architecture and evaluation protocol |
-| [docs/FLUED_V3_3_ABLATION_INTERFACE_CN.md](docs/FLUED_V3_3_ABLATION_INTERFACE_CN.md) | v3.3 train/config/matrix interface for direct ablations |
-| [docs/FLUED_WEBSITE_SHOWCASE_CN.md](docs/FLUED_WEBSITE_SHOWCASE_CN.md) | Website-ready project showcase copy for Alethic Insight |
-| [FLUED_V3_FULL_METRIC_TABLE_REEVALUATION_CN.md](FLUED_V3_FULL_METRIC_TABLE_REEVALUATION_CN.md) | Detailed v3 checkpoint re-evaluation table |
-| [FLUED_V3_CHECKPOINT_REEVALUATION_CN.md](FLUED_V3_CHECKPOINT_REEVALUATION_CN.md) | Earlier v3 checkpoint audit and conclusion correction |
-| [FLUED_REBUILD.md](FLUED_REBUILD.md) | v2 semantic rebuild notes |
+| [Documentation index](docs/README.md) | Versioned map and evidence status |
+| [Research retrospective](docs/research/FLUED_RESEARCH_RETROSPECTIVE_CN.md) | v1-v3.3 reasoning, failures, and iteration process |
+| [v3.4 implementation](docs/versions/v3.4/FLUED_V3_4_IMPLEMENTATION_BASELINE_CN.md) | Current executable architecture |
+| [v3.4 5K analysis](docs/versions/v3.4/FLUED_V3_4_5K_ABLATION_ANALYSIS_20260711_CN.md) | Current structural evidence and decisions |
+| [v3-family checkpoint audit](docs/research/evidence/v3-family/FLUED_V3_FULL_METRIC_TABLE_REEVALUATION_CN.md) | Strict historical checkpoint re-evaluation |
+| [v2 rebuild](docs/versions/v2/FLUED_REBUILD.md) | v2 semantic rebuild notes |
 
 ## Repository Map
 
 ```text
 flued/model.py                         FLUED v2 model
 flued/v33/                             v3.3 byte-to-latent interface prototype
+flued/v34/                             v3.4 rate/emit and parallel-memory extension
 flued/e1_stage_a.py                    v2 denoising reconstruction trainer
 flued/e3_train.py                      downstream language-model training
 flued/e3_downstream.py                 FLUED/BPE/BLT downstream wrappers
-tools/analysis/train_v31_*.py          v3.1 prototype training scripts
-tools/analysis/train_v32_*.py          v3.2 / v3.2.1 prototype training scripts
-tools/analysis/train_v3_strict_*.py    strict paired-backbone evaluation
-tools/eval/                            ROI, memory, boundary, probe diagnostics
-tools/launcher/                        local/cloud launchers, including historical runs
-tools/train/train_v33.py               v3.3 train / eval entrypoint
-configs/v33_ablation_2m.json           v3.3 core ablation matrix
-docs/                                  public research documentation
+tools/*/v3_0...v3_4/                   versioned experiment utilities
+tools/train/v3_4/                      current v3.4 training entrypoint
+configs/v3_3/, configs/v3_4/           versioned experiment matrices
+docs/versions/                         version-frozen design and result records
+results/v3.4/5k_ablation/              public raw logs and curve artifacts
 ```
 
 ## Quick Start
@@ -210,30 +224,30 @@ pip install tokenizers numpy tqdm
 python -m flued.e1_stage_a --preset smoke_cpu
 ```
 
-Run a v3.3 public smoke test:
+Run a v3.4 short smoke test:
 
 ```bash
-python tools/train/train_v33.py \
-  --config configs/v33_no_memory_smoke.json \
-  --device cpu \
-  --max-steps 2
+python tools/train/v3_4/train_v34_pos_ar_probe.py \
+  --config configs/v3_4/v34_rate_emit_40m_probe.json \
+  --data-path /path/to/corpus.txt \
+  --out-dir outputs/v34_smoke \
+  --device cpu --max-steps 2
 ```
 
-Run the v3.3 2M ablation matrix on GPU:
+Run the v3.4 matrix on GPU:
 
 ```bash
-python tools/launcher/run_v33_ablation_matrix.py \
-  --matrix configs/v33_ablation_2m.json \
-  --data-path /path/to/corpus_v3.txt \
-  --device cuda \
-  --batch-size 128 \
-  --amp
+python tools/launcher/v3_4/run_v34_pos_ar_matrix.py \
+  --matrix configs/v3_4/v34_rate_emit_all_ablation_5k.json \
+  --out-root outputs/v34_5k \
+  --batch-size 8
 ```
 
-Summarize v3.3 ablations:
+Rebuild the public curve summary:
 
 ```bash
-python tools/analysis/summarize_v33_ablation.py --root checkpoints/v33_2m_core
+python tools/analysis/v3_4/analyze_v34_5k_curves.py \
+  --root outputs/v34_5k --out-dir outputs/v34_5k/analysis
 ```
 
 Representative v2 E1 run:
@@ -258,11 +272,14 @@ python -m flued.e1_stage_a \
 1. v2 soft assignment still builds a full `[B, T, T]` matrix internally.
 2. Compression control is weak; target compression does not reliably control
    the final `m/n`.
-3. v3.3 is an architecture endpoint, not yet a fully trained SOTA model.
-4. Memory remains a branch until it beats no-memory under strict paired-backbone
-   and causal patching tests.
-5. The current public claim is research-process depth and architecture clarity,
-   not benchmark dominance.
+3. v3.4 evidence is still one seed, 5K steps, 512-byte sequences, and a 37M
+   FLUED probe rather than the planned 300M / 4096-byte scale.
+4. L2 marginal rate is still plastic at 5K; semantic boundary quality is not yet
+   established by external labels or long-context downstream tasks.
+5. Memory improves reconstruction in this probe but has not shown a reliable
+   completion gain after accounting for added compute.
+6. The current public claim is a traceable research process and executable
+   architecture, not benchmark dominance.
 
 ## License
 

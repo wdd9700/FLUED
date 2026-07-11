@@ -14,7 +14,7 @@ from typing import Iterator
 
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers
 
-CORPUS = r"E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt"
+CORPUS = r"data/corpus.txt"
 OUTPUT_DIR = Path("checkpoints/bpe_tokenizer")
 
 

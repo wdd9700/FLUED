@@ -1,7 +1,7 @@
 # run_ab1_w025.ps1 — AB1 compression sweep with weight=0.25 (retry after w=0.3 NaN)
-$Python = "C:\Python314\python.exe"
-Set-Location "E:\projects\FLUED\FLUED"
-$DataPath = "E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt"
+$Python = "python"
+Set-Location "."
+$DataPath = "data/corpus.txt"
 
 $env:OMP_NUM_THREADS = "4"
 $env:MKL_NUM_THREADS = "4"

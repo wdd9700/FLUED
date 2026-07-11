@@ -9,7 +9,7 @@ Loads final checkpoints for all three models and evaluates:
 
 Usage
 -----
-C:\Python314\python.exe run_e2_full.py
+python run_e2_full.py
 
 Output
 ------
@@ -32,7 +32,7 @@ from flued.data import ByteReconstructionDataset, safe_train_eval_split, STUB_CO
 from flued.config import ModelConfig
 
 RESULTS_FILE = "checkpoints/e2_compare_results.json"
-DATA_PATH = r"E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt"
+DATA_PATH = r"data/corpus.txt"
 FLUED_CKPT = "checkpoints/e1_step50000.pt"
 BPE_CKPT = "bpe_baseline_standalone/checkpoints/bpe_latest.pt"
 BLT_CKPT = "checkpoints/blt_latest.pt"

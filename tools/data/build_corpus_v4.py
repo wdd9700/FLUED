@@ -76,7 +76,7 @@ class Source:
 DEFAULT_SOURCES = [
     # Baseline: keep exactly as the existing FLUED training corpus source.
     Source(
-        Path(r"E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt"),
+        Path(r"data/corpus.txt"),
         "plain",
         "baseline",
         None,
@@ -438,7 +438,7 @@ def export_stats(conn: sqlite3.Connection, out_path: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--out-dir", default=r"N:\FLUED_corpus_v4")
+    p.add_argument("--out-dir", default=r"data/corpus_v4")
     p.add_argument("--target-gb", type=float, default=180.0, help="Stop after this much UTF-8 output.")
     p.add_argument("--shard-gb", type=float, default=4.0)
     p.add_argument("--min-chars", type=int, default=32)

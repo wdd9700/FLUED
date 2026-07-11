@@ -7,17 +7,18 @@
 
 | Task | Command |
 |------|---------|
-| Run tests | `C:\Python314\python.exe -m pytest tests/` |
-| Smoke test E1 | `C:\Python314\python.exe -m flued.e1_stage_a --preset smoke_cpu` |
-| Full E1 train | See [gpu_retrain_e1.ps1](gpu_retrain_e1.ps1) or [repo memory](memories/repo/flued_v04.md#L88-94) |
+| Run tests | `python -m pytest tests/` |
+| Smoke test E1 | `python -m flued.e1_stage_a --preset smoke_cpu` |
+| v3.4 trainer help | `python tools/train/v3_4/train_v34_pos_ar_probe.py --help` |
+| v3.4 matrix help | `python tools/launcher/v3_4/run_v34_pos_ar_matrix.py --help` |
 | Check GPU | `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader` |
 | Check running procs | `Get-Process python*` |
 | Read checkpoint step | `python -c "import torch; c=torch.load('checkpoints/e1_latest.pt', map_location='cpu', weights_only=False); print(c.get('global_step',0))"` |
 
 ## Environment
 
-- **Python**: `C:\Python314\python.exe` (3.14.0) — **required**. Python 3.13.5 crashes with NumPy BLAS FPE on import.
-- **PyTorch**: 2.11.0+cu128 (`https://download.pytorch.org/whl/cu128`)
+- **Python**: 3.11+; local validated environments currently use Python 3.12 for CUDA and Python 3.14 for tests.
+- **PyTorch**: CUDA 12.8-compatible build for RTX 50-series GPU work.
 - **GPU**: RTX 5080, 16 GB VRAM, CUDA 13.2
 - **CPU**: Set `$env:OMP_NUM_THREADS=4; $env:MKL_NUM_THREADS=4` before training to avoid thread explosion.
 
@@ -33,7 +34,7 @@ E1 (Stage A)  →  E2 (Comparison)  →  E3 (Downstream LM)
 - **BLT** (baseline): Byte Latent Transformer — uses a pre-trained Byte LM's entropy to determine patches.
 - **BPE** (baseline): Standard encoder-decoder Transformer on BPE tokens (vocab 8192).
 
-Full architecture doc: [README.md](README.md) · Detailed specs: [repo memory](memories/repo/flued_v04.md)
+Full project status: [README.md](README.md) · Versioned documentation: [docs/README.md](docs/README.md)
 
 ## Key Files
 
@@ -46,6 +47,11 @@ Full architecture doc: [README.md](README.md) · Detailed specs: [repo memory](m
 | `flued/e2_compare.py` | E2: multi-model comparison |
 | `flued/e3_train.py` | E3: downstream causal LM training |
 | `flued/e3_downstream.py` | `FLUEDDownstream`, `BLTDownstream`, `BPEDownstream` wrappers |
+| `flued/v33/` | v3.3 codec implementation |
+| `flued/v34/` | v3.4 parallel-memory and rate/emit extension |
+| `tools/train/v3_4/train_v34_pos_ar_probe.py` | v3.4 train/eval entrypoint |
+| `configs/v3_4/` | v3.4 reproducible experiment matrices |
+| `results/v3.4/5k_ablation/` | Public raw logs and curve artifacts |
 
 ## Conventions
 
@@ -57,14 +63,14 @@ Full architecture doc: [README.md](README.md) · Detailed specs: [repo memory](m
 
 ## ⚠️ Critical Pitfalls
 
-1. **🚫 NEVER use wildcards to delete checkpoints.** Always `Get-ChildItem` first, verify, then delete explicitly by name. Keep last 2-3 checkpoints per model. See [checkpoint-safety](memories/repo/flued_v04.md#L163-171).
+1. **Never use wildcards to delete checkpoints.** Always list and verify exact paths first. Keep the latest checkpoint and analysis milestones.
 
-2. **FP16 entropy/log underflow**: When computing entropy over 257-class softmax in FP16, cast to `.float()` first and use `epsilon=1e-12` (not 1e-8 — below FP16 epsilon). See [FP16 underflow](memories/repo/flued_v04.md#L173-176).
+2. **FP16 entropy/log underflow**: When computing entropy over the byte vocabulary in FP16, cast to `.float()` before logarithms.
 
-3. **GradScaler overflow**: On overflow skip, metrics accumulate but step doesn't — track `running_micro_count` and rollback. See [overflow fix](memories/repo/flued_v04.md#L178-180).
+3. **GradScaler overflow**: On overflow skip, metrics must not advance as if an optimizer step succeeded.
 
-4. **CUDA context corruption**: After `Stop-Process -Force` on a GPU process, wait 10-30s before launching new training or risk `cudaErrorIllegalAddress`. See [GPU context](memories/repo/flued_v04.md#L186-189).
+4. **CUDA context corruption**: After force-stopping a GPU process, wait for the CUDA context to clear before launching another run.
 
-5. **Duplicate process check**: Always run `Get-Process python*` before launching training to avoid parallel GPU processes. See [process check](memories/repo/flued_v04.md#L191-193).
+5. **Duplicate process check**: Always inspect active Python/GPU processes before launching training.
 
-6. **replace_string_in_file**: Always include ≥3 lines of context before AND after the target to ensure unique match. See [edit safety](memories/repo/flued_v04.md#L182-184).
+6. **Versioned paths**: v3 experiment code lives under `tools/*/v3_*`; do not reintroduce pre-reorganization import paths.

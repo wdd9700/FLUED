@@ -1,7 +1,7 @@
 # watch_and_launch_ab1.ps1 — Wait for AB2 to finish, then launch AB1 compression (weight=0.3)
-$Python = "C:\Python314\python.exe"
-Set-Location "E:\projects\FLUED\FLUED"
-$DataPath = "E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt"
+$Python = "python"
+Set-Location "."
+$DataPath = "data/corpus.txt"
 $env:OMP_NUM_THREADS = "4"
 $env:MKL_NUM_THREADS = "4"
 $env:PYTHONUNBUFFERED = "1"
@@ -13,7 +13,7 @@ $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 # Detect if E1 training is running
 $sleepMinutes = 10
 while ($true) {
-    $running = Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq 'C:\Python314\python.exe' }
+    $running = Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq 'python' }
     if (-not $running) {
         $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
         "$ts  No training detected. Proceeding in 30s..." | Out-File $LogFile -Append -Encoding utf8

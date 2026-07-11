@@ -2,11 +2,11 @@
 # Usage: powershell -File auto_e3_launcher.ps1
 
 $ErrorActionPreference = "Continue"
-$Python = "C:\Python314\python.exe"
-$ProjectDir = "E:\projects\FLUED\FLUED"
+$Python = "python"
+$ProjectDir = "."
 Set-Location $ProjectDir
 
-$DataPath = "E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt"
+$DataPath = "data/corpus.txt"
 $MaxLines = 50000
 $E1MaxSteps = 50000
 $E3MaxSteps = 20000

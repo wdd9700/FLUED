@@ -1,0 +1,8 @@
+# FLUED v3.3
+
+- [`FLUED_V3_3_ARCHITECTURE_CN.md`](FLUED_V3_3_ARCHITECTURE_CN.md)：完整 byte-to-latent 接口。
+- [`FLUED_V3_3_ABLATION_INTERFACE_CN.md`](FLUED_V3_3_ABLATION_INTERFACE_CN.md)：配置与消融入口。
+- [`FLUED_V3_3_EFFICIENCY_NOTES_CN.md`](FLUED_V3_3_EFFICIENCY_NOTES_CN.md)：效率分析。
+- [`FLUED_V3_3_RISK_PROBES_20260708_CN.md`](FLUED_V3_3_RISK_PROBES_20260708_CN.md)：架构风险探针。
+
+代码位于 `flued/v33/`，训练入口位于 `tools/train/v3_3/`。v3.3 是 v3.4 的历史基线，不再是当前终点。

@@ -4,9 +4,9 @@
 #
 # Safe to run even if AB2 is already running — it will wait.
 
-$Python = "C:\Python314\python.exe"
-Set-Location "E:\projects\FLUED\FLUED"
-$DataPath = "E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt"
+$Python = "python"
+Set-Location "."
+$DataPath = "data/corpus.txt"
 
 $env:OMP_NUM_THREADS = "4"
 $env:MKL_NUM_THREADS = "4"
@@ -21,7 +21,7 @@ function Write-Log { param($msg) $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'; "
 Write-Log "=== PIPELINE: AB2 then AB1 (weight=0.3) ==="
 Write-Log "Phase 0: Checking for running training..."
 
-$running = Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq 'C:\Python314\python.exe' }
+$running = Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq 'python' }
 if ($running) {
     $pids = $running | ForEach-Object { $_.Id }
     Write-Log "Found running python PIDs: $($pids -join ', '). Waiting..."
@@ -64,12 +64,12 @@ foreach ($dp in $DenoiseProbs) {
     $CkptFile = "$CkptDir/e1_step30000.pt"
 
     if (Test-Path $CkptFile) {
-        Write-Log "AB2 dp=$dp: already has step30000 checkpoint, skipping."
+        Write-Log "AB2 dp=${dp}: already has step30000 checkpoint, skipping."
         continue
     }
     if (-not (Test-Path $CkptDir)) { New-Item -ItemType Directory -Path $CkptDir | Out-Null }
 
-    Write-Log "AB2 dp=$dp: STARTING → $CkptDir"
+    Write-Log "AB2 dp=${dp}: STARTING → $CkptDir"
     $free = [math]::Round((Get-PSDrive E).Free/1GB, 1)
     Write-Log "  E盘 free: ${free}GB"
 
@@ -110,12 +110,12 @@ foreach ($tc in $CompressionTargets) {
     $CkptFile = "$CkptDir/e1_step30000.pt"
 
     if (Test-Path $CkptFile) {
-        Write-Log "AB1(w=0.3) tc=$tc: already has step30000 checkpoint, skipping."
+        Write-Log "AB1(w=0.3) tc=${tc}: already has step30000 checkpoint, skipping."
         continue
     }
     if (-not (Test-Path $CkptDir)) { New-Item -ItemType Directory -Path $CkptDir | Out-Null }
 
-    Write-Log "AB1(w=0.3) tc=$tc: STARTING → $CkptDir"
+    Write-Log "AB1(w=0.3) tc=${tc}: STARTING → $CkptDir"
     $free = [math]::Round((Get-PSDrive E).Free/1GB, 1)
     Write-Log "  E盘 free: ${free}GB"
 

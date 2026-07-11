@@ -3,7 +3,7 @@ backup_ckpt.py — Strip optimizer states, save model-only checkpoints for GitHu
 
 Usage:
   python tools/launcher/backup_ckpt.py --ckpt checkpoints/e1_seed42/e1_latest.pt
-  python tools/launcher/backup_ckpt.py --ckpt checkpoints/e1_blt_stage1/bytel\ m_latest.pt
+  python tools/launcher/backup_ckpt.py --ckpt checkpoints/e1_blt_stage1/bytelm_latest.pt
   python tools/launcher/backup_ckpt.py --all-latest  # backs up all *_latest.pt
 """
 import argparse

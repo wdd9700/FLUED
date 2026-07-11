@@ -1,11 +1,11 @@
 # auto_s3.ps1 — Auto-launch S3 E1 after S2 finishes
 $ErrorActionPreference = "Continue"
 
-$Python = "C:\Python314\python.exe"
+$Python = "python"
 $env:OMP_NUM_THREADS = "4"
 $env:MKL_NUM_THREADS = "4"
 
-$DataPath = "E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt"
+$DataPath = "data/corpus.txt"
 $ResumePath = "F:\FLUED\checkpoints\e1_seed999\e1_step24000.pt"
 $CkptDir = "F:\FLUED\checkpoints\e1_seed999"
 $LogFile = "$CkptDir\e1_class300m_48gb.log"

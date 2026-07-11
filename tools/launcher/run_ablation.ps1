@@ -10,7 +10,7 @@ $env:MKL_NUM_THREADS = 4
 
 $base = @(
     "--preset", "class300m_48gb",
-    "--data-path", "E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt",
+    "--data-path", "data/corpus.txt",
     "--max-lines", "50000",
     "--max-steps", "10000",
     "--batch-size", "4",
@@ -74,6 +74,6 @@ $args = $base + @(
 )
 
 $logFile = "checkpoints/e1_ablation_$Experiment.log"
-$cmd = "C:\Python314\python.exe -m flued.e1_stage_a $args 2>&1 | Tee-Object -FilePath `"$logFile`""
+$cmd = "python -m flued.e1_stage_a $args 2>&1 | Tee-Object -FilePath `"$logFile`""
 Write-Host "Launching: python -m flued.e1_stage_a ..."
 Invoke-Expression $cmd

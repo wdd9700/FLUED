@@ -1,11 +1,11 @@
 # retrain_e1_complete.ps1 — Wait for E1 finish, then retrain from scratch with FULL logging
 # Captures the complete learning curve for paper.
 
-$Python = "C:\Python314\python.exe"
-$ProjectDir = "E:\projects\FLUED\FLUED"
+$Python = "python"
+$ProjectDir = "."
 Set-Location $ProjectDir
 
-$DataPath = "E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt"
+$DataPath = "data/corpus.txt"
 
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host " E1 RETRAIN — $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"

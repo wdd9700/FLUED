@@ -18,7 +18,7 @@ device = torch.device("cpu")
 print(f"Device: {device}")
 
 # ── Data ──
-DATA_PATH = r"E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt"
+DATA_PATH = r"data/corpus.txt"
 with open(DATA_PATH, encoding="utf-8") as fh:
     texts = [line.rstrip("\n") for line in fh if line.strip()]
 texts = texts[:200]

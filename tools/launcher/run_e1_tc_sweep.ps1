@@ -9,7 +9,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ---- Validate ----
-$DataPath = 'E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt'
+$DataPath = 'data/corpus.txt'
 if (-not (Test-Path $DataPath)) {
     Write-Error "Data not found: $DataPath"
     exit 1
@@ -40,7 +40,7 @@ $env:MKL_NUM_THREADS = 4
 
 # ---- Launch ----
 $cmd = @(
-    'C:\Python314\python.exe', '-m', 'flued.e1_stage_a',
+    'python', '-m', 'flued.e1_stage_a',
     '--preset', 'class300m_16gb',
     '--data-path', $DataPath,
     '--max-lines', '50000',

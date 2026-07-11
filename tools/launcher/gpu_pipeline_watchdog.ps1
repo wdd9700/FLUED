@@ -6,8 +6,8 @@ $env:MKL_NUM_THREADS = 4
 Write-Host "=== GPU Pipeline Watchdog ===" -ForegroundColor Cyan
 Write-Host "Started: $(Get-Date -Format 'HH:mm:ss')"
 
-$python = "C:\Python314\python.exe"
-$data = "E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt"
+$python = "python"
+$data = "data/corpus.txt"
 
 # Step 1: Wait for FLUED
 Write-Host "[1/3] Waiting for FLUED to finish..." -ForegroundColor Yellow

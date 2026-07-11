@@ -2,11 +2,11 @@
 # Runs AFTER current E1 (PID 62944) finishes.
 # Uses existing checkpoints to minimize retrain steps.
 
-$Python = "C:\Python314\python.exe"
-$ProjectDir = "E:\projects\FLUED\FLUED"
+$Python = "python"
+$ProjectDir = "."
 Set-Location $ProjectDir
 
-$DataPath = "E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt"
+$DataPath = "data/corpus.txt"
 $env:OMP_NUM_THREADS = "4"
 $env:MKL_NUM_THREADS = "4"
 

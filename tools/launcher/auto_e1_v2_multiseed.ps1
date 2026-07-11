@@ -3,10 +3,10 @@
 #
 # Usage: .\tools\launcher\auto_e1_v2_multiseed.ps1
 
-$Python = "C:\Python314\python.exe"
-Set-Location "E:\projects\FLUED\FLUED"
+$Python = "python"
+Set-Location "."
 
-$DataPath = "E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt"
+$DataPath = "data/corpus.txt"
 $env:OMP_NUM_THREADS = "4"
 $env:MKL_NUM_THREADS = "4"
 $env:PYTHONUNBUFFERED = "1"

@@ -1,8 +1,8 @@
 # gpu_retrain_e1.ps1 — Full E1 retrain from scratch on GPU with tee logging
-$Python = "C:\Python314\python.exe"
-Set-Location "E:\projects\FLUED\FLUED"
+$Python = "python"
+Set-Location "."
 
-$DataPath = "E:\projects\SoulMamba\soulvlm_project\temp\corpus_v3.txt"
+$DataPath = "data/corpus.txt"
 $LogFile = "checkpoints/e1_retrain_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
 $env:OMP_NUM_THREADS = "4"
