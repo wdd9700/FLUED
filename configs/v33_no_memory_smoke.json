@@ -1,0 +1,22 @@
+{
+  "out_dir": "checkpoints/v33_no_memory_smoke",
+  "seq_len": 128,
+  "batch_size": 16,
+  "max_steps": 200,
+  "max_eval_batches": 4,
+  "d_model": 256,
+  "d_z": 256,
+  "hidden": 512,
+  "max_chunks": 128,
+  "max_span": 16,
+  "strict_masked_source": true,
+  "mask_prob": 0.15,
+  "visible_loss_weight": 0.25,
+  "masked_loss_weight": 1.0,
+  "length_loss_weight": 0.05,
+  "boundary_loss_weight": 0.02,
+  "rate_loss_weight": 0.02,
+  "target_rate": 0.5,
+  "use_memory": false,
+  "use_backbone": false
+}

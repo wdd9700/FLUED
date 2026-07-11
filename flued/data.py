@@ -169,6 +169,21 @@ class StreamingReconstructionDataset(torch.utils.data.IterableDataset):
             max_start = max(0, self.file_size - self.seq_len - 2)
             for _ in range(self.samples_per_worker):
                 start = rng.randint(0, max_start)
+                # Prefer natural text starts. Random mmap offsets often land in
+                # the middle of UTF-8 codepoints or lines, which creates a
+                # train/eval segmentation distribution mismatch for codec
+                # experiments even though the raw bytes are valid training data.
+                search_from = max(0, start - 256)
+                line_start = mm.rfind(b"\n", search_from, start + 1)
+                if line_start >= 0 and line_start + 1 <= max_start:
+                    start = line_start + 1
+                for _adjust in range(4):
+                    if start >= max_start:
+                        break
+                    b0 = mm[start]
+                    if not (0x80 <= b0 <= 0xBF):
+                        break
+                    start += 1
                 raw = mm[start : start + self.seq_len + 1]
                 if len(raw) < self.seq_len + 1:
                     continue
@@ -177,6 +192,97 @@ class StreamingReconstructionDataset(torch.utils.data.IterableDataset):
                 src = buf[:self.seq_len]
                 tgt = buf[1:self.seq_len + 1]
                 yield src, tgt
+
+
+class ShardedStreamingReconstructionDataset(torch.utils.data.IterableDataset):
+    """Streaming reconstruction dataset over a text-file shard manifest.
+
+    The manifest contains one UTF-8 text shard path per line.  Sampling is
+    weighted by shard byte size, so large shards contribute proportionally
+    without concatenating the corpus into one 200GB+ file.
+    """
+
+    def __init__(
+        self,
+        manifest_path: str,
+        seq_len: int = 512,
+        samples_per_worker: int = 2000,
+        seed: int = 42,
+    ) -> None:
+        import os
+        super().__init__()
+        self.manifest_path = manifest_path
+        self.seq_len = int(seq_len)
+        self.samples_per_worker = int(samples_per_worker)
+        self.seed = int(seed)
+        root = []
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                path = line.strip()
+                if not path:
+                    continue
+                size = os.path.getsize(path)
+                if size > self.seq_len + 2:
+                    root.append((path, size))
+        if not root:
+            raise ValueError(f"No usable shards found in manifest: {manifest_path}")
+        self.shards = root
+        self.total_size = sum(size for _path, size in self.shards)
+
+    def __iter__(self):
+        import bisect
+        import mmap
+        import random
+
+        worker_info = torch.utils.data.get_worker_info()
+        worker_seed = self.seed
+        if worker_info is not None:
+            worker_seed = self.seed + worker_info.id * 10000
+        rng = random.Random(worker_seed)
+        cumulative = []
+        total = 0
+        for _path, size in self.shards:
+            total += size
+            cumulative.append(total)
+
+        handles = {}
+
+        def get_mmap(index: int):
+            if index not in handles:
+                path, size = self.shards[index]
+                fh = open(path, "rb")
+                mm = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
+                handles[index] = (fh, mm, size)
+            return handles[index][1], handles[index][2]
+
+        try:
+            for _ in range(self.samples_per_worker):
+                shard_idx = bisect.bisect_right(cumulative, rng.randrange(total))
+                mm, size = get_mmap(shard_idx)
+                max_start = max(0, size - self.seq_len - 2)
+                start = rng.randint(0, max_start)
+                search_from = max(0, start - 256)
+                line_start = mm.rfind(b"\n", search_from, start + 1)
+                if line_start >= 0 and line_start + 1 <= max_start:
+                    start = line_start + 1
+                for _adjust in range(4):
+                    if start >= max_start:
+                        break
+                    b0 = mm[start]
+                    if not (0x80 <= b0 <= 0xBF):
+                        break
+                    start += 1
+                raw = mm[start : start + self.seq_len + 1]
+                if len(raw) < self.seq_len + 1:
+                    continue
+                buf = torch.frombuffer(bytearray(raw), dtype=torch.uint8).long() + 1
+                src = buf[: self.seq_len]
+                tgt = buf[1 : self.seq_len + 1]
+                yield src, tgt
+        finally:
+            for fh, mm, _size in handles.values():
+                mm.close()
+                fh.close()
 
 
 class SimpleBPE:
