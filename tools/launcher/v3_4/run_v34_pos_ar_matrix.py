@@ -19,6 +19,7 @@ def main() -> None:
     parser.add_argument("--out-root", default="outputs/v34_pos_ar_40m_probe")
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--data-path", default=None)
     parser.add_argument("--only", default="")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--rerun-complete", action="store_true")
@@ -33,6 +34,8 @@ def main() -> None:
             config["max_steps"] = args.max_steps
         if args.batch_size is not None:
             config["batch_size"] = args.batch_size
+        if args.data_path is not None:
+            config["data_path"] = args.data_path
         run_dir = Path(args.out_root) / experiment["id"]
         run_dir.mkdir(parents=True, exist_ok=True)
         summary_path = run_dir / "summary.json"
