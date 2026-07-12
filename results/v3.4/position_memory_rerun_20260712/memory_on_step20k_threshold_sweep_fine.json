@@ -1,0 +1,111 @@
+{
+  "checkpoint": "K:\\FLUED_archive\\v34_hybrid_memory_deterministic_20k_20260712\\hybrid_s003_memory_on\\latest.pt",
+  "checkpoint_step": 20000,
+  "use_memory": true,
+  "eval_seed": 20260712,
+  "max_eval_batches": 16,
+  "boundary_state": {
+    "mode": "marginal_rate_topk",
+    "coding_rate_mode": "l2",
+    "blend_alpha": 1.0,
+    "restored_from": "checkpoint"
+  },
+  "rows": [
+    {
+      "emit_threshold": 0.32,
+      "identity_acc": 0.89251708984375,
+      "identity_loss": 0.5128101892769337,
+      "completion_mask_acc": 0.12079178774729371,
+      "completion_masked_loss": 3.775470569729805,
+      "completion_ppl": 43.61802881121514,
+      "completion_preserve_acc": 0.13159010000526905,
+      "actual_backbone_units_per_byte": 0.6442718505859375,
+      "soft_readout_units_per_byte": 0.45756441354751587,
+      "chunks_per_byte": 0.062835693359375
+    },
+    {
+      "emit_threshold": 0.34,
+      "identity_acc": 0.8849029541015625,
+      "identity_loss": 0.545275554060936,
+      "completion_mask_acc": 0.12980445194989443,
+      "completion_masked_loss": 3.689222991466522,
+      "completion_ppl": 40.013743854732006,
+      "completion_preserve_acc": 0.143267800565809,
+      "actual_backbone_units_per_byte": 0.6066131591796875,
+      "soft_readout_units_per_byte": 0.45756441354751587,
+      "chunks_per_byte": 0.062835693359375
+    },
+    {
+      "emit_threshold": 0.36,
+      "identity_acc": 0.8767547607421875,
+      "identity_loss": 0.5774972084909678,
+      "completion_mask_acc": 0.1325517357327044,
+      "completion_masked_loss": 3.6449816077947617,
+      "completion_ppl": 38.282068753417576,
+      "completion_preserve_acc": 0.1478661415167153,
+      "actual_backbone_units_per_byte": 0.5702362060546875,
+      "soft_readout_units_per_byte": 0.45756441354751587,
+      "chunks_per_byte": 0.062835693359375
+    },
+    {
+      "emit_threshold": 0.38,
+      "identity_acc": 0.86785888671875,
+      "identity_loss": 0.6116025298833847,
+      "completion_mask_acc": 0.134989395737648,
+      "completion_masked_loss": 3.6125394701957703,
+      "completion_ppl": 37.06004630051583,
+      "completion_preserve_acc": 0.15135848568752408,
+      "actual_backbone_units_per_byte": 0.5302886962890625,
+      "soft_readout_units_per_byte": 0.45756441354751587,
+      "chunks_per_byte": 0.062835693359375
+    },
+    {
+      "emit_threshold": 0.42,
+      "identity_acc": 0.8494415283203125,
+      "identity_loss": 0.6819393821060658,
+      "completion_mask_acc": 0.13786972779780626,
+      "completion_masked_loss": 3.5786439776420593,
+      "completion_ppl": 35.82492849078566,
+      "completion_preserve_acc": 0.15477859694510698,
+      "actual_backbone_units_per_byte": 0.45721435546875,
+      "soft_readout_units_per_byte": 0.45756441354751587,
+      "chunks_per_byte": 0.062835693359375
+    },
+    {
+      "emit_threshold": 0.44,
+      "identity_acc": 0.8404998779296875,
+      "identity_loss": 0.7156902961432934,
+      "completion_mask_acc": 0.13674725499004126,
+      "completion_masked_loss": 3.5791790783405304,
+      "completion_ppl": 35.84410356488399,
+      "completion_preserve_acc": 0.1557218972593546,
+      "actual_backbone_units_per_byte": 0.4253387451171875,
+      "soft_readout_units_per_byte": 0.45756441354751587,
+      "chunks_per_byte": 0.062835693359375
+    },
+    {
+      "emit_threshold": 0.46,
+      "identity_acc": 0.8302764892578125,
+      "identity_loss": 0.7567561604082584,
+      "completion_mask_acc": 0.13703918270766735,
+      "completion_masked_loss": 3.5798271000385284,
+      "completion_ppl": 35.86733884941048,
+      "completion_preserve_acc": 0.1554493703879416,
+      "actual_backbone_units_per_byte": 0.3971099853515625,
+      "soft_readout_units_per_byte": 0.45756441354751587,
+      "chunks_per_byte": 0.062835693359375
+    },
+    {
+      "emit_threshold": 0.48,
+      "identity_acc": 0.820159912109375,
+      "identity_loss": 0.7961039133369923,
+      "completion_mask_acc": 0.1358934468589723,
+      "completion_masked_loss": 3.581392139196396,
+      "completion_ppl": 35.92351658791202,
+      "completion_preserve_acc": 0.15630340296775103,
+      "actual_backbone_units_per_byte": 0.3695068359375,
+      "soft_readout_units_per_byte": 0.45756441354751587,
+      "chunks_per_byte": 0.062835693359375
+    }
+  ]
+}

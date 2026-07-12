@@ -127,10 +127,11 @@ class EmitDecision:
 class ReadoutEmitController(nn.Module):
     """One fallback readout plus value-gated optional readouts."""
 
-    def __init__(self, dim: int, initial_extra_probability: float = 0.1) -> None:
+    def __init__(self, dim: int, initial_extra_probability: float = 0.1, threshold: float = 0.5) -> None:
         super().__init__()
         self.norm = nn.LayerNorm(dim)
         self.head = nn.Linear(dim, 1)
+        self.threshold = float(threshold)
         probability = min(max(float(initial_extra_probability), 1.0e-4), 1.0 - 1.0e-4)
         bias = torch.logit(torch.tensor(probability)).item()
         nn.init.zeros_(self.head.weight)
@@ -141,7 +142,7 @@ class ReadoutEmitController(nn.Module):
         # candidate representation merely to change its emit score.
         logits = self.head(self.norm(candidates.detach())).squeeze(-1)
         soft = torch.sigmoid(logits) * chunk_mask.unsqueeze(-1).to(logits.dtype)
-        hard = soft.ge(0.5) & chunk_mask.unsqueeze(-1)
+        hard = soft.ge(self.threshold) & chunk_mask.unsqueeze(-1)
         if hard.size(-1):
             hard = hard.clone()
             hard[..., 0] = chunk_mask

@@ -12,5 +12,7 @@
 6. [`FLUED_V3_4_PROGRESSIVE_MEMORY_ROI_20260712_CN.md`](FLUED_V3_4_PROGRESSIVE_MEMORY_ROI_20260712_CN.md)
 7. [`FLUED_V3_4_BOUNDARY_ROI_PROTOCOL_CN.md`](FLUED_V3_4_BOUNDARY_ROI_PROTOCOL_CN.md)
 8. [`../../../results/v3.4/progressive_memory_20k/`](../../../results/v3.4/progressive_memory_20k/)
+9. [`FLUED_V3_4_GLOBAL_PATH_CORRECTION_AND_RERUN_20260712_CN.md`](FLUED_V3_4_GLOBAL_PATH_CORRECTION_AND_RERUN_20260712_CN.md)
+10. [`../../../results/v3.4/position_memory_rerun_20260712/`](../../../results/v3.4/position_memory_rerun_20260712/)
 
 `FLUED_V3_4_ABLATION_RESULTS_20260710_CN.md` 是早期 1K pilot，仅用于观察初始收敛，不应覆盖 5K 结论。

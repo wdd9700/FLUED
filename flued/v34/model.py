@@ -50,6 +50,21 @@ def _rope(x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
     return x * cos + _rotate_half(x) * sin
 
 
+def _sinusoidal_position(seq: int, dim: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """Absolute prompt-level position side channel carried by byte payloads."""
+    even_dim = dim - (dim % 2)
+    positions = torch.arange(seq, device=device, dtype=torch.float32).unsqueeze(1)
+    frequencies = torch.exp(
+        torch.arange(0, even_dim, 2, device=device, dtype=torch.float32)
+        * (-math.log(10000.0) / max(even_dim, 1))
+    )
+    phase = positions * frequencies.unsqueeze(0)
+    encoded = torch.zeros(seq, dim, device=device, dtype=torch.float32)
+    encoded[:, 0:even_dim:2] = phase.sin()
+    encoded[:, 1:even_dim:2] = phase.cos()
+    return encoded.to(dtype)
+
+
 class ParallelAttention(nn.Module):
     def __init__(self, dim: int, nhead: int, use_rope: bool) -> None:
         super().__init__()
@@ -231,13 +246,14 @@ class QueryPool(nn.Module):
 
 
 class DenseNoSelfMemory(nn.Module):
-    def __init__(self, dim: int, nhead: int) -> None:
+    def __init__(self, dim: int, nhead: int, use_position: bool = True) -> None:
         super().__init__()
         if dim % nhead:
             raise ValueError("dim must be divisible by nhead")
         self.dim = dim
         self.nhead = nhead
         self.head_dim = dim // nhead
+        self.use_position = bool(use_position)
         self.q = nn.Linear(dim, dim, bias=False)
         self.k = nn.Linear(dim, dim, bias=False)
         self.v = nn.Linear(dim, dim, bias=False)
@@ -256,6 +272,9 @@ class DenseNoSelfMemory(nn.Module):
         v = self.v(memory).view(bsz, chunks * ranks, self.nhead, self.head_dim).transpose(1, 2)
         q_owner = torch.arange(chunks, device=readout.device).repeat_interleave(readouts)
         k_owner = torch.arange(chunks, device=readout.device).repeat_interleave(ranks)
+        if self.use_position:
+            q = _rope(q, q_owner)
+            k = _rope(k, k_owner)
         no_self = q_owner[:, None].ne(k_owner[None, :])
         key_valid = chunk_mask.repeat_interleave(ranks, dim=1)
         query_valid = chunk_mask.repeat_interleave(readouts, dim=1)
@@ -299,6 +318,7 @@ class SmallChunkARCorrection(nn.Module):
         token_mask: torch.Tensor,
         memory: torch.Tensor,
         readout: torch.Tensor,
+        apply_memory: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         bsz, chunks, width, dim = spans.shape
         flat = spans.reshape(bsz * chunks, width, dim)
@@ -306,19 +326,22 @@ class SmallChunkARCorrection(nn.Module):
         lengths = token_mask.sum(dim=-1).clamp(min=1).reshape(-1)
         index = (lengths - 1).view(-1, 1, 1).expand(-1, 1, sequence.size(-1))
         summary = torch.gather(sequence, 1, index).squeeze(1)
-        memory_delta = torch.tanh(self.memory_proj(summary)).view(bsz, chunks, self.memory_rank, dim)
         readout_delta = torch.tanh(self.readout_proj(summary)).view(bsz, chunks, self.readouts, dim)
-        memory_gate = self.gate_scale * torch.sigmoid(self.memory_gate(summary)).view(bsz, chunks, 1, 1)
         readout_gate = self.gate_scale * torch.sigmoid(self.readout_gate(summary)).view(bsz, chunks, 1, 1)
-        memory_applied = memory_gate * memory_delta
         readout_applied = readout_gate * readout_delta
         active = token_mask.any(dim=-1).unsqueeze(-1).unsqueeze(-1).to(memory.dtype)
-        memory_out = (memory + memory_applied) * active
+        if apply_memory:
+            memory_delta = torch.tanh(self.memory_proj(summary)).view(bsz, chunks, self.memory_rank, dim)
+            memory_gate = self.gate_scale * torch.sigmoid(self.memory_gate(summary)).view(bsz, chunks, 1, 1)
+            memory_applied = memory_gate * memory_delta
+            memory_out = (memory + memory_applied) * active
+            memory_ratio = memory_applied.norm(dim=-1).mean() / memory.detach().norm(dim=-1).mean().clamp(min=1.0e-6)
+        else:
+            memory_out = memory
+            memory_ratio = readout_applied.new_zeros(())
         readout_out = (readout + readout_applied) * active
-        ratio = 0.5 * (
-            memory_applied.norm(dim=-1).mean() / memory.detach().norm(dim=-1).mean().clamp(min=1.0e-6)
-            + readout_applied.norm(dim=-1).mean() / readout.detach().norm(dim=-1).mean().clamp(min=1.0e-6)
-        )
+        readout_ratio = readout_applied.norm(dim=-1).mean() / readout.detach().norm(dim=-1).mean().clamp(min=1.0e-6)
+        ratio = 0.5 * (memory_ratio + readout_ratio) if apply_memory else readout_ratio
         return memory_out, readout_out, ratio
 
 
@@ -362,11 +385,14 @@ class FLUEDV34ProbeConfig:
     readout_vectors: int = 4
     ar_hidden: int = 128
     use_position: bool = True
+    position_strategy: str = "layered_rope"
+    prompt_position_scale: float = 0.1
     use_ar: bool = True
     use_structured_lookup: bool = True
     use_memory: bool = True
-    use_logic_prior: bool = True
     use_boundary_bridge: bool = True
+    memory_use_position: bool = True
+    memory_residual_scale: float = 0.1
     boundary_mode: str = "threshold"
     coding_rate_dim: int = 16
     coding_rate_epsilon: float = 1.0
@@ -378,6 +404,7 @@ class FLUEDV34ProbeConfig:
     use_emit_controller: bool = False
     emit_forward_mode: str = "hard_st"
     emit_initial_probability: float = 0.1
+    emit_threshold: float = 0.5
     max_chunks: int = 40
     max_span: int = 128
     tau_cut: float = 0.9
@@ -403,27 +430,38 @@ class V34ProbeOutput:
 
 
 class FLUEDV34Probe(nn.Module):
-    """One-tenth-scale v3.4 probe for position x AR experiments."""
+    """Scalable FLUED v3.4 codec used by both probes and full models."""
 
     def __init__(self, config: FLUEDV34ProbeConfig | None = None) -> None:
         super().__init__()
         self.config = config or FLUEDV34ProbeConfig()
         c = self.config
+        if c.position_strategy not in {"layered_rope", "prompt_additive", "prompt_plus_local_rope", "none"}:
+            raise ValueError(
+                "position_strategy must be layered_rope, prompt_additive, prompt_plus_local_rope, or none"
+            )
+        strategy = c.position_strategy if c.use_position else "none"
+        self.position_strategy = strategy
+        layer_rope = strategy in {"layered_rope", "prompt_plus_local_rope"}
+        self.use_prompt_position = strategy in {"prompt_additive", "prompt_plus_local_rope"}
         self.byte_lookup = StructuredByteLookup(c.d_model)
         self.segmentor_blocks = nn.ModuleList(
-            [DiTStyleBlock(c.d_model, c.nhead, c.ffn_dim, c.use_position) for _ in range(c.segmentor_layers)]
+            [DiTStyleBlock(c.d_model, c.nhead, c.ffn_dim, layer_rope) for _ in range(c.segmentor_layers)]
         )
         self.segmentor_head = nn.Sequential(nn.LayerNorm(c.d_model), nn.Linear(c.d_model, 1))
         self.policy = FixedDualThresholdPolicy(c.tau_cut, c.tau_trans)
         self.chunk_builder = ChunkBuilder(c.max_chunks, c.max_span)
         self.boundary_bridge = SoftBoundaryBridge(c.max_chunks, c.tau_cut, c.boundary_temperature)
-        self.logic_transition_prior = nn.Parameter(torch.empty(c.d_model))
-        self.memory_pool = QueryPool(c.d_model, c.memory_rank, c.nhead, c.use_position)
-        self.readout_pool = QueryPool(c.d_model, c.readout_vectors, c.nhead, c.use_position)
-        self.memory_read = DenseNoSelfMemory(c.d_model, c.nhead)
+        self.memory_pool = QueryPool(c.d_model, c.memory_rank, c.nhead, layer_rope)
+        self.readout_pool = QueryPool(c.d_model, c.readout_vectors, c.nhead, layer_rope)
+        self.memory_read = DenseNoSelfMemory(
+            c.d_model,
+            c.nhead,
+            strategy == "layered_rope" and c.memory_use_position,
+        )
         self.memory_gate = nn.Sequential(nn.LayerNorm(c.d_model * 2), nn.Linear(c.d_model * 2, c.d_model), nn.Sigmoid())
         self.interpreter_blocks = nn.ModuleList(
-            [DiTStyleBlock(c.d_model, c.nhead, c.ffn_dim, c.use_position) for _ in range(c.interpreter_layers)]
+            [DiTStyleBlock(c.d_model, c.nhead, c.ffn_dim, layer_rope) for _ in range(c.interpreter_layers)]
         )
         # Instantiate in every ablation so parameter counts stay identical.
         self.ar = SmallChunkARCorrection(
@@ -433,7 +471,6 @@ class FLUEDV34Probe(nn.Module):
             c.readout_vectors,
         )
         self.decoder = SpanDecoder(c.d_model, c.ffn_dim, c.max_span, self.byte_lookup)
-        nn.init.trunc_normal_(self.logic_transition_prior, std=0.02)
         # Instantiate the ablation table last so enabling the switch does not
         # perturb initialization of the shared architecture.
         self.plain_byte_lookup = PlainByteLookup(c.d_model)
@@ -448,7 +485,7 @@ class FLUEDV34Probe(nn.Module):
             c.coding_rate_temperature,
             c.coding_rate_mode,
         )
-        self.emit_controller = ReadoutEmitController(c.d_model, c.emit_initial_probability)
+        self.emit_controller = ReadoutEmitController(c.d_model, c.emit_initial_probability, c.emit_threshold)
 
     @staticmethod
     def _capacity_safe_cuts(
@@ -511,6 +548,11 @@ class FLUEDV34Probe(nn.Module):
         valid = token_ids.ne(PAD_ID)
         active_lookup = self.byte_lookup if c.use_structured_lookup else self.plain_byte_lookup
         x = active_lookup(token_ids)
+        if self.use_prompt_position:
+            prompt_position = _sinusoidal_position(
+                token_ids.size(1), c.d_model, x.device, x.dtype
+            ).unsqueeze(0)
+            x = x + float(c.prompt_position_scale) * prompt_position * valid.unsqueeze(-1).to(x.dtype)
         noise = torch.full((token_ids.size(0),), c.noise_scale if self.training else 0.0, device=x.device)
         if self.training and c.noise_scale > 0:
             x = x + torch.randn_like(x) * c.noise_scale
@@ -600,12 +642,13 @@ class FLUEDV34Probe(nn.Module):
                 force_continue,
                 cut_probability=coding_selection.soft_cut if coding_selection is not None else None,
             )
-        memory = self.memory_pool(chunks.span_embeddings, chunks.token_mask)
-        logic_prior = (
-            chunks.transition_markers.unsqueeze(-1).to(chunks.span_embeddings.dtype)
-            * self.logic_transition_prior.view(1, 1, 1, -1)
-        )
-        interpreter_spans = chunks.span_embeddings + logic_prior * float(c.use_logic_prior)
+        if c.use_memory:
+            memory = self.memory_pool(chunks.span_embeddings, chunks.token_mask)
+        else:
+            memory = chunks.span_embeddings.new_zeros(
+                chunks.span_embeddings.size(0), c.max_chunks, c.memory_rank, c.d_model
+            )
+        interpreter_spans = chunks.span_embeddings
         readout = self.readout_pool(interpreter_spans, chunks.token_mask)
         if c.use_ar:
             memory, readout, ar_delta = self.ar(
@@ -613,18 +656,34 @@ class FLUEDV34Probe(nn.Module):
                 chunks.token_mask,
                 memory,
                 readout,
+                apply_memory=c.use_memory,
             )
         else:
             ar_delta = readout.new_zeros(())
-        memory_ctx, mem_aux = self.memory_read(readout, memory, chunks.chunk_mask)
-        # The usage-range regularizer should specialize the gate controller,
-        # not reshape readout or memory merely to satisfy a scalar quota.
-        gate = self.memory_gate(torch.cat([readout, memory_ctx], dim=-1).detach())
-        readout = readout + gate * memory_ctx * float(c.use_memory)
-        flat = readout.reshape(readout.size(0), -1, readout.size(-1))
-        flat_valid = chunks.chunk_mask.unsqueeze(-1).expand(-1, -1, c.readout_vectors).reshape(readout.size(0), -1)
+        if c.use_memory:
+            memory_ctx, mem_aux = self.memory_read(readout, memory, chunks.chunk_mask)
+            # The controller chooses how strongly each channel reads global
+            # context; a bounded residual scale keeps local translation primary.
+            gate = self.memory_gate(torch.cat([readout, memory_ctx], dim=-1).detach())
+            memory_residual = gate * memory_ctx * float(c.memory_residual_scale)
+            readout = readout + memory_residual
+        else:
+            memory_ctx = torch.zeros_like(readout)
+            memory_residual = torch.zeros_like(readout)
+            gate = readout.new_zeros(readout.shape)
+            mem_aux = {
+                "self_allowed": readout.new_zeros(()),
+                "visible_memory_slots": readout.new_zeros(
+                    readout.size(0), c.max_chunks * c.readout_vectors
+                ),
+            }
+        # Interpreter refinement is local to each chunk. Cross-chunk context
+        # is available only through the explicit no-self memory path above.
+        flat = readout.reshape(readout.size(0) * c.max_chunks, c.readout_vectors, c.d_model)
+        flat_valid = chunks.chunk_mask.reshape(-1, 1).expand(-1, c.readout_vectors)
+        local_noise = noise.repeat_interleave(c.max_chunks)
         for block in self.interpreter_blocks:
-            flat = block(flat, flat_valid, noise)
+            flat = block(flat, flat_valid, local_noise)
         readout_candidates = flat.reshape_as(readout)
         emit = self.emit_controller(readout_candidates, chunks.chunk_mask)
         if c.use_emit_controller:
@@ -656,6 +715,12 @@ class FLUEDV34Probe(nn.Module):
             aux={
                 **mem_aux,
                 "memory_gate_mean": gate[chunks.chunk_mask.unsqueeze(-1).expand_as(gate[..., 0])].mean() if chunks.chunk_mask.any() else gate.new_zeros(()),
+                "memory_context_norm": memory_ctx[chunks.chunk_mask].float().norm(dim=-1).mean() if chunks.chunk_mask.any() else gate.new_zeros(()),
+                "memory_residual_ratio": (
+                    memory_residual[chunks.chunk_mask].float().norm(dim=-1).mean()
+                    / readout_candidates[chunks.chunk_mask].detach().float().norm(dim=-1).mean().clamp(min=1.0e-6)
+                    if chunks.chunk_mask.any() else gate.new_zeros(())
+                ),
                 "requested_hard_cut": requested_hard_cut,
                 "cut_capacity_overflow": cut_overflow,
                 "marginal_coding_rate": coding_selection.marginal_rate if coding_selection is not None else confidence.new_zeros(confidence.shape),
@@ -666,3 +731,9 @@ class FLUEDV34Probe(nn.Module):
 
     def forward(self, token_ids: torch.Tensor) -> V34ProbeOutput:
         return self.encode(token_ids)
+
+
+# Public full-model names share the exact implementation used by probes. Model
+# scale is controlled only by FLUEDV34Config fields and training configuration.
+FLUEDV34Config = FLUEDV34ProbeConfig
+FLUEDV34 = FLUEDV34Probe

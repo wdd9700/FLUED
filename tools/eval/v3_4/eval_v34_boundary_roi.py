@@ -33,11 +33,14 @@ DEFAULT_MODEL = {
     "readout_vectors": 4,
     "ar_hidden": 16,
     "use_position": True,
+    "position_strategy": "layered_rope",
+    "prompt_position_scale": 0.1,
     "use_ar": True,
     "use_structured_lookup": True,
     "use_memory": True,
-    "use_logic_prior": True,
     "use_boundary_bridge": False,
+    "memory_use_position": True,
+    "memory_residual_scale": 0.1,
     "boundary_mode": "threshold",
     "boundary_coding_rate_dim": 16,
     "boundary_coding_rate_epsilon": 1.0,
@@ -48,6 +51,7 @@ DEFAULT_MODEL = {
     "use_emit_controller": True,
     "emit_forward_mode": "hard_st",
     "emit_initial_probability": 0.1,
+    "emit_threshold": 0.5,
     "max_chunks": 32,
     "max_span": 32,
     "tau_cut": 0.9,
@@ -104,6 +108,7 @@ def load_model(checkpoint_text: str, model_args: dict[str, Any], device: torch.d
     model = build_model(Namespace(**args)).to(device).eval()
     if checkpoint_text:
         missing, unexpected = model.load_state_dict(state, strict=False)
+        unexpected = [name for name in unexpected if name != "logic_transition_prior"]
         if missing or unexpected:
             raise RuntimeError(f"checkpoint/model mismatch: missing={missing}, unexpected={unexpected}")
         if runtime_boundary_state:

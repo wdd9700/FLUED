@@ -28,7 +28,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from flued.data import BYTE_VOCAB_SIZE, MASK_ID, PAD_ID, text_to_byte_ids  # noqa: E402
-from flued.v34 import FLUEDV34Probe, FLUEDV34ProbeConfig  # noqa: E402
+from flued.v34 import FLUEDV34, FLUEDV34Config  # noqa: E402
 from tools.train.v3_3.train_v33 import (  # noqa: E402
     LatentInfillBackbone,
     _append_jsonl,
@@ -44,9 +44,9 @@ from tools.train.v3_3.train_v33 import (  # noqa: E402
 )
 
 
-def build_model(args: argparse.Namespace) -> FLUEDV34Probe:
-    return FLUEDV34Probe(
-        FLUEDV34ProbeConfig(
+def build_model(args: argparse.Namespace) -> FLUEDV34:
+    return FLUEDV34(
+        FLUEDV34Config(
             d_model=args.d_model,
             nhead=args.nhead,
             ffn_dim=args.ffn_dim,
@@ -56,11 +56,14 @@ def build_model(args: argparse.Namespace) -> FLUEDV34Probe:
             readout_vectors=args.readout_vectors,
             ar_hidden=args.ar_hidden,
             use_position=args.use_position,
+            position_strategy=getattr(args, "position_strategy", "layered_rope"),
+            prompt_position_scale=getattr(args, "prompt_position_scale", 0.1),
             use_ar=args.use_ar,
             use_structured_lookup=args.use_structured_lookup,
             use_memory=args.use_memory,
-            use_logic_prior=args.use_logic_prior,
             use_boundary_bridge=args.use_boundary_bridge,
+            memory_use_position=getattr(args, "memory_use_position", True),
+            memory_residual_scale=getattr(args, "memory_residual_scale", 0.1),
             boundary_mode=getattr(args, "boundary_mode", "threshold"),
             coding_rate_dim=getattr(args, "boundary_coding_rate_dim", 16),
             coding_rate_epsilon=getattr(args, "boundary_coding_rate_epsilon", 1.0),
@@ -72,6 +75,7 @@ def build_model(args: argparse.Namespace) -> FLUEDV34Probe:
             use_emit_controller=getattr(args, "use_emit_controller", False),
             emit_forward_mode=getattr(args, "emit_forward_mode", "hard_st"),
             emit_initial_probability=getattr(args, "emit_initial_probability", 0.1),
+            emit_threshold=getattr(args, "emit_threshold", 0.5),
             max_chunks=args.max_chunks,
             max_span=args.max_span,
             tau_cut=args.tau_cut,
@@ -82,7 +86,7 @@ def build_model(args: argparse.Namespace) -> FLUEDV34Probe:
     )
 
 
-def apply_boundary_curriculum(model: FLUEDV34Probe, args: argparse.Namespace, step: int) -> bool:
+def apply_boundary_curriculum(model: FLUEDV34, args: argparse.Namespace, step: int) -> bool:
     """Apply a hard switch or a fixed-budget uniform-to-rate score transition."""
     switch_step = int(getattr(args, "boundary_curriculum_switch_step", 0))
     if switch_step <= 0 or step < switch_step:
@@ -229,7 +233,7 @@ def projected_coding_rate_loss(
 
 
 def step_model(
-    model: FLUEDV34Probe,
+    model: FLUEDV34,
     backbone: LatentInfillBackbone,
     batch,
     args: argparse.Namespace,
@@ -286,10 +290,12 @@ def step_model(
         selected_rate = out.aux["marginal_coding_rate"][out.policy.hard_cut]
         coding_rate = selected_rate.float().mean().to(out.readout_z.dtype) if selected_rate.numel() else coding_rate_loss
     memory_gate_mean = out.aux["memory_gate_mean"]
+    memory_context_norm = out.aux["memory_context_norm"]
+    memory_residual_ratio = out.aux["memory_residual_ratio"]
     memory_usage_loss = (
         F.relu(args.memory_usage_min - memory_gate_mean).square()
         + F.relu(memory_gate_mean - args.memory_usage_max).square()
-    )
+    ) if args.use_memory else memory_gate_mean.new_zeros(())
     emit_value_loss = out.readout_z.new_zeros(())
     emit_value_mean = out.readout_z.new_zeros(())
     emit_target_mean = out.readout_z.new_zeros(())
@@ -399,6 +405,8 @@ def step_model(
             "ar_delta": float(out.ar_delta.item()),
             "coding_rate": float(coding_rate.item()),
             "memory_gate_mean": float(memory_gate_mean.item()),
+            "memory_context_norm": float(memory_context_norm.item()),
+            "memory_residual_ratio": float(memory_residual_ratio.item()),
             "memory_usage_loss": float(memory_usage_loss.item()),
             "emit_value_loss": float(emit_value_loss.item()),
             "emit_value_mean": float(emit_value_mean.item()),
@@ -420,7 +428,7 @@ def _relative_delta(x: torch.Tensor, y: torch.Tensor) -> float:
 
 
 @torch.no_grad()
-def order_probe(model: FLUEDV34Probe, seq_len: int, device: torch.device) -> Dict[str, float]:
+def order_probe(model: FLUEDV34, seq_len: int, device: torch.device) -> Dict[str, float]:
     base = "the model reads from cache and returns the value."
     swap = "the model raeds from cache and returns the value."
     substitute = "the model rxyds from cache and returns the value."
@@ -483,7 +491,13 @@ def run(args: argparse.Namespace) -> dict:
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
-        torch.backends.cudnn.benchmark = True
+        if getattr(args, "deterministic", False):
+            os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.deterministic = True
+            torch.use_deterministic_algorithms(True)
+        else:
+            torch.backends.cudnn.benchmark = True
     device = torch.device(args.device if args.device == "cpu" or torch.cuda.is_available() else "cpu")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -502,7 +516,7 @@ def run(args: argparse.Namespace) -> dict:
     model_params = sum(p.numel() for p in model.parameters())
     backbone_params = sum(p.numel() for p in backbone.parameters())
     result_base = {
-        "model_version": "flued_v3_4_position_ar_probe",
+        "model_version": "flued_v3_4",
         "run_id": args.run_id,
         "model_params": model_params,
         "backbone_params": backbone_params,
@@ -671,6 +685,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--d-model", type=int, default=512)
     parser.add_argument("--nhead", type=int, default=8)
     parser.add_argument("--ffn-dim", type=int, default=1536)
@@ -680,11 +695,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--readout-vectors", type=int, default=4)
     parser.add_argument("--ar-hidden", type=int, default=128)
     parser.add_argument("--use-position", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--position-strategy",
+        choices=["layered_rope", "prompt_additive", "prompt_plus_local_rope", "none"],
+        default="layered_rope",
+    )
+    parser.add_argument("--prompt-position-scale", type=float, default=0.1)
     parser.add_argument("--use-ar", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use-structured-lookup", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use-memory", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--use-logic-prior", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use-boundary-bridge", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--memory-use-position", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--memory-residual-scale", type=float, default=0.1)
     parser.add_argument(
         "--boundary-mode",
         choices=["threshold", "marginal_rate_topk", "uniform_budget", "uniform_l2_blend"],
@@ -708,6 +730,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-emit-controller", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--emit-forward-mode", choices=["hard_st", "soft"], default="hard_st")
     parser.add_argument("--emit-initial-probability", type=float, default=0.1)
+    parser.add_argument("--emit-threshold", type=float, default=0.5)
     parser.add_argument("--max-chunks", type=int, default=64)
     parser.add_argument("--max-span", type=int, default=128)
     parser.add_argument("--tau-cut", type=float, default=0.9)

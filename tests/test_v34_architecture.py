@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 
 from flued.data import text_to_byte_ids
-from flued.v34.model import FLUEDV34Probe, FLUEDV34ProbeConfig, SpanDecoder
+from flued.v34.model import FLUEDV34Probe, FLUEDV34ProbeConfig, SpanDecoder, _sinusoidal_position
 from flued.v34.rate_emit import MarginalCodingRateSelector, ReadoutEmitController
 from tools.train.v3_4.train_v34_pos_ar_probe import apply_boundary_curriculum
 
@@ -124,6 +124,20 @@ def test_v34_emit_controller_keeps_fallback_and_straight_through_gradient() -> N
     (out.straight_through.sum()).backward()
     assert controller.head.bias.grad is not None
     assert controller.head.bias.grad.abs().item() > 0
+
+
+def test_v34_emit_threshold_monotonically_reduces_extra_readouts() -> None:
+    torch.manual_seed(17)
+    controller = ReadoutEmitController(16, initial_extra_probability=0.5, threshold=0.2)
+    candidates = torch.randn(2, 3, 5, 16)
+    chunk_mask = torch.ones(2, 3, dtype=torch.bool)
+
+    low = controller(candidates, chunk_mask)
+    controller.threshold = 0.8
+    high = controller(candidates, chunk_mask)
+
+    assert high.hard[..., 0].equal(chunk_mask)
+    assert int(high.hard[..., 1:].sum()) <= int(low.hard[..., 1:].sum())
 
 
 def test_v34_rate_emit_main_loss_reaches_both_controllers() -> None:
@@ -277,3 +291,101 @@ def test_v34_coding_rate_single_chunk_budget_only_selects_first() -> None:
     assert out.hard_cut.sum().item() == 1
     assert out.hard_cut[0, 0]
     assert out.soft_cut.sum().item() == 1.0
+
+
+def _memory_locality_model(use_memory: bool) -> FLUEDV34Probe:
+    return FLUEDV34Probe(
+        FLUEDV34ProbeConfig(
+            d_model=32,
+            nhead=4,
+            ffn_dim=64,
+            segmentor_layers=1,
+            interpreter_layers=1,
+            memory_rank=2,
+            readout_vectors=2,
+            ar_hidden=8,
+            use_ar=False,
+            use_memory=use_memory,
+            boundary_mode="uniform_budget",
+            bytes_per_chunk_budget=8,
+            max_chunks=2,
+            max_span=8,
+            noise_scale=0.0,
+        )
+    ).eval()
+
+
+def test_v34_no_memory_keeps_other_chunks_out_of_readout() -> None:
+    model = _memory_locality_model(use_memory=False)
+    first = "abcdefgh"
+    ids_a = torch.tensor([text_to_byte_ids(first + "ijklmnop")])
+    ids_b = torch.tensor([text_to_byte_ids(first + "QRSTUVWX")])
+    with torch.no_grad():
+        out_a = model(ids_a)
+        out_b = model(ids_b)
+    assert torch.equal(out_a.readout_z[:, 0], out_b.readout_z[:, 0])
+    assert out_a.memory_z.count_nonzero().item() == 0
+    assert out_a.aux["memory_gate_mean"].item() == 0.0
+
+
+def test_v34_memory_is_the_only_cross_chunk_readout_path() -> None:
+    model = _memory_locality_model(use_memory=True)
+    first = "abcdefgh"
+    ids_a = torch.tensor([text_to_byte_ids(first + "ijklmnop")])
+    ids_b = torch.tensor([text_to_byte_ids(first + "QRSTUVWX")])
+    with torch.no_grad():
+        readout_a = model(ids_a).readout_z[:, 0]
+        readout_b = model(ids_b).readout_z[:, 0]
+    assert not torch.equal(readout_a, readout_b)
+
+
+def test_v34_logic_transition_prior_has_no_active_parameter() -> None:
+    names = dict(_memory_locality_model(use_memory=True).named_parameters())
+    assert "logic_transition_prior" not in names
+
+
+def test_v34_prompt_position_replaces_layered_rope() -> None:
+    model = FLUEDV34Probe(
+        FLUEDV34ProbeConfig(
+            d_model=32,
+            nhead=4,
+            ffn_dim=64,
+            segmentor_layers=1,
+            interpreter_layers=1,
+            position_strategy="prompt_additive",
+            max_chunks=2,
+            max_span=8,
+        )
+    )
+    assert model.position_strategy == "prompt_additive"
+    assert model.segmentor_blocks[0].attn.use_rope is False
+    assert model.readout_pool.use_position is False
+    assert model.memory_read.use_position is False
+    assert model.interpreter_blocks[0].attn.use_rope is False
+
+
+def test_v34_prompt_position_side_channel_distinguishes_offsets() -> None:
+    encoded = _sinusoidal_position(4, 32, torch.device("cpu"), torch.float32)
+    assert encoded.shape == (4, 32)
+    assert not torch.equal(encoded[0], encoded[1])
+
+
+def test_v34_prompt_plus_local_rope_keeps_local_order_without_chunk_rope() -> None:
+    model = FLUEDV34Probe(
+        FLUEDV34ProbeConfig(
+            d_model=32,
+            nhead=4,
+            ffn_dim=64,
+            segmentor_layers=1,
+            interpreter_layers=1,
+            position_strategy="prompt_plus_local_rope",
+            memory_use_position=True,
+            max_chunks=2,
+            max_span=8,
+        )
+    )
+    assert model.use_prompt_position is True
+    assert model.segmentor_blocks[0].attn.use_rope is True
+    assert model.readout_pool.use_position is True
+    assert model.interpreter_blocks[0].attn.use_rope is True
+    assert model.memory_read.use_position is False
