@@ -1,5 +1,7 @@
 # FLUED v3.4 全局路径纠偏与消融重跑范围
 
+> 本文记录第一轮纠偏及其当时结果。后续 P0-P4 严格串行实验加入提示级 ALiBi、memory 位置对照和无仿射 LayerNorm，并完成 20K 三组确认；当前默认结论见 [`FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md`](FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md)。
+
 ## 1. 根因
 
 旧 v3.4 在 memory 注入后执行：
@@ -145,9 +147,9 @@ chunk-local interpreter + other-chunk memory
 | 0.39 | 0.46 / 0.397 | 35.87 | 0.56 / 0.391 | 37.93 | memory 更优 |
 | 0.34 | 0.50 / 0.346 | 35.96 | 0.58 / 0.335 | 37.89 | memory 更优 |
 
-这纠正了“memory 起倒忙”的单点结论：
+这组已被后续 P4 覆盖的历史结果，当时纠正了“memory 起倒忙”的单点结论：
 
-1. 5K 时 memory 同时改善重建和补全，说明分支本身可以学习；
+1. 当时 5K 的 memory 同时改善重建和补全，说明分支本身可以学习；
 2. 20K 时 memory 成为低码率语义辅助，在紧计算预算下改善补全困惑度；
 3. memory 对精确重建的长期损害仍然真实，不能被困惑度收益掩盖；
 4. `memory_context_norm≈106`、`memory_residual_ratio≈0.21`，说明 memory 与局部 readout 的尺度对齐仍需修正；
@@ -157,4 +159,4 @@ chunk-local interpreter + other-chunk memory
 
 ## 6. Claim 边界
 
-当前可以声称提示级位置与局部 RoPE 的混合方案优于旧分层位置方案，并且 memory 在低实际潜向量预算下形成了补全 Pareto 收益。仍不能声称 memory 已解决精确可逆翻译；该分支的长期重建退化和尺度错配尚未解决。旧数据仍只适合说明为什么需要严格 masked-source、真实计算账本、边界 ROI 和逐路径审计。
+本文当时可以声称提示级位置与局部 RoPE 的混合方案优于旧分层位置方案，并且旧 memory 路径在低实际潜向量预算下形成了补全 Pareto 收益。该结论已由 2026-07-13 P4 取代；本文数据只用于说明为什么需要严格 masked-source、真实计算账本、边界 ROI 和逐路径审计。

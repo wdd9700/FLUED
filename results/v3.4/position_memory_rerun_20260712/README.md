@@ -1,5 +1,7 @@
 # v3.4 位置编码与 Memory 确定性重跑
 
+> 历史纠偏结果：本轮发生在最终提示级 ALiBi、memory 位置和无仿射 LayerNorm 组合确定之前。当前结论见 [`../../../docs/versions/v3.4/FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md`](../../../docs/versions/v3.4/FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md)。
+
 ## 实验口径
 
 - 小型完整 v3.4：约 37.3M FLUED + 4.8M 临时主干；

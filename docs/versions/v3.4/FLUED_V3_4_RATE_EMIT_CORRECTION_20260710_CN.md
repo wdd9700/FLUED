@@ -103,4 +103,4 @@ V_j = (L_{off}-L_{on}) + \lambda_R \widetilde{\Delta R}_{chunk} - C_{backbone}(N
 2. 软 emit 的分数看似最稀疏，但 backbone 仍计算所有候选，证明软 gate 不能代表真实计算压缩。
 3. 均匀边界用约 3.3 倍实际 latent 换来 0.011 的补全准确率提升，identity 反而更差。边际编码率当前主要改善精度/计算量前沿，而不是在不计成本时取得最高短程 accuracy。
 4. 完整组不是最少 soft units，但它把硬 emit、反事实价值和实际压紧计算统一起来；`soft/actual/padded` 三个量必须同时报告。
-5. 全部实验截断为 0。当前结论仍限于单种子、500 步和 512 byte。
+5. 全部实验截断为 0。本文机制验证结论仅限于单种子、500 步和 512 byte。

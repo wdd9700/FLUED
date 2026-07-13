@@ -1,5 +1,7 @@
 # FLUED v3.4 统一 5K 消融与曲线分析
 
+> 历史短程筛选：后续全局路径纠偏、memory 归一化和 20K 配对实验改变了部分默认判断。当前结论见 [`FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md`](FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md)。
+
 ## 1. 实验口径
 
 - 17 组全部使用纠正后的 v3.4 两级决策代码。
@@ -79,12 +81,12 @@ RoPE 必须保留。小 AR 只有和 RoPE 同时存在时才显著提高 identit
 
 因此 exact 的问题不是边界抖动，而是过早固定在次优位置。L2 的边界持续重组，却得到更高 identity、completion 和更低 actual latent，说明其可塑性目前是优势。uniform 提供绝对稳定的对齐，decoder/backbone 最容易学习，但通过接近不压缩的计算量获得上限。
 
-## 6. 当前决策
+## 6. 本轮历史决策
 
-1. **下一轮动态边界默认候选改为 L2 coding rate**，exact log-det 保留为对照。
+1. **当时的下一轮动态边界候选改为 L2 coding rate**，exact log-det 保留为对照。
 2. **RoPE + 小 AR 成组保留**；不再单独启用小 AR。
 3. **结构化 byte lookup 保留**。
-4. **memory 保留为可选 Pareto 旋钮**，需要计算匹配实验后才能决定默认开启。
+4. **当时把 memory 保留为可选 Pareto 旋钮**；后续 20K 配对已经确定 normalized other-only/no-self memory 为当前小规模默认路径。
 5. **emit 必须继续硬前向并真实压紧**；soft-only 明确失败于计算效率。
 6. **重构 emit 预算控制**：把实际 latent 总量作为约束，用自适应对偶优化，而非固定 cost 权重。
 7. **尝试 uniform warmup -> L2 adaptive 的边界课程**：先让 decoder/backbone 获得稳定对齐，再逐步释放动态边界，兼顾 uniform 的可训练性和 L2 的压缩效率。

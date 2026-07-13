@@ -1,0 +1,75 @@
+{
+  "checkpoint": "L:\\FLUED_archive\\v34_serial_experiments_20260713\\p4_a_no_memory\\step_009000.pt",
+  "checkpoint_step": 9000,
+  "use_memory": false,
+  "eval_seed": 20260712,
+  "max_eval_batches": 16,
+  "boundary_state": {
+    "mode": "marginal_rate_topk",
+    "coding_rate_mode": "l2",
+    "blend_alpha": 1.0,
+    "restored_from": "checkpoint"
+  },
+  "rows": [
+    {
+      "emit_threshold": 0.3,
+      "identity_acc": 0.8793792724609375,
+      "identity_loss": 0.5568678993731737,
+      "completion_mask_acc": 0.12085233582183719,
+      "completion_masked_loss": 3.7756524235010147,
+      "completion_ppl": 43.62596163553234,
+      "completion_preserve_acc": 0.12928357999771833,
+      "actual_backbone_units_per_byte": 0.9127655029296875,
+      "soft_readout_units_per_byte": 0.5895692631602287,
+      "chunks_per_byte": 0.062957763671875
+    },
+    {
+      "emit_threshold": 0.4,
+      "identity_acc": 0.8561859130859375,
+      "identity_loss": 0.6394699104130268,
+      "completion_mask_acc": 0.1285812766291201,
+      "completion_masked_loss": 3.662590429186821,
+      "completion_ppl": 38.962140926892346,
+      "completion_preserve_acc": 0.13732807245105505,
+      "actual_backbone_units_per_byte": 0.823883056640625,
+      "soft_readout_units_per_byte": 0.5895692631602287,
+      "chunks_per_byte": 0.062957763671875
+    },
+    {
+      "emit_threshold": 0.5,
+      "identity_acc": 0.8199615478515625,
+      "identity_loss": 0.7666500210762024,
+      "completion_mask_acc": 0.13419635500758886,
+      "completion_masked_loss": 3.6299836188554764,
+      "completion_ppl": 37.71219884314229,
+      "completion_preserve_acc": 0.14565276075154543,
+      "actual_backbone_units_per_byte": 0.6005706787109375,
+      "soft_readout_units_per_byte": 0.5895692631602287,
+      "chunks_per_byte": 0.062957763671875
+    },
+    {
+      "emit_threshold": 0.6,
+      "identity_acc": 0.7755584716796875,
+      "identity_loss": 0.9360054805874825,
+      "completion_mask_acc": 0.13586988067254424,
+      "completion_masked_loss": 3.637553334236145,
+      "completion_ppl": 37.99875265184337,
+      "completion_preserve_acc": 0.1477837529964745,
+      "actual_backbone_units_per_byte": 0.45831298828125,
+      "soft_readout_units_per_byte": 0.5895692631602287,
+      "chunks_per_byte": 0.062957763671875
+    },
+    {
+      "emit_threshold": 0.7,
+      "identity_acc": 0.71661376953125,
+      "identity_loss": 1.188237838447094,
+      "completion_mask_acc": 0.13367531402036548,
+      "completion_masked_loss": 3.6755334436893463,
+      "completion_ppl": 39.46970610805005,
+      "completion_preserve_acc": 0.14338435046374798,
+      "actual_backbone_units_per_byte": 0.3307342529296875,
+      "soft_readout_units_per_byte": 0.5895692631602287,
+      "chunks_per_byte": 0.062957763671875
+    }
+  ]
+}

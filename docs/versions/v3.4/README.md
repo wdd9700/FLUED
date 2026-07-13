@@ -13,6 +13,8 @@
 7. [`FLUED_V3_4_BOUNDARY_ROI_PROTOCOL_CN.md`](FLUED_V3_4_BOUNDARY_ROI_PROTOCOL_CN.md)
 8. [`../../../results/v3.4/progressive_memory_20k/`](../../../results/v3.4/progressive_memory_20k/)
 9. [`FLUED_V3_4_GLOBAL_PATH_CORRECTION_AND_RERUN_20260712_CN.md`](FLUED_V3_4_GLOBAL_PATH_CORRECTION_AND_RERUN_20260712_CN.md)
-10. [`../../../results/v3.4/position_memory_rerun_20260712/`](../../../results/v3.4/position_memory_rerun_20260712/)
+10. [历史位置/memory 纠偏结果](../../../results/v3.4/position_memory_rerun_20260712/)
+11. [`FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md`](FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md)
+12. [`../../../results/v3.4/memory_position_20k_20260713/`](../../../results/v3.4/memory_position_20k_20260713/)
 
-`FLUED_V3_4_ABLATION_RESULTS_20260710_CN.md` 是早期 1K pilot，仅用于观察初始收敛，不应覆盖 5K 结论。
+`FLUED_V3_4_ABLATION_RESULTS_20260710_CN.md` 是早期 1K pilot，5K 文档是短程结构筛选；涉及位置和 memory 默认路径时，以 2026-07-13 的 20K 分析为准。

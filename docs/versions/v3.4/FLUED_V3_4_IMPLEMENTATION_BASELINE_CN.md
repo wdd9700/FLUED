@@ -11,12 +11,12 @@ flowchart TD
     X["masked or clean byte IDs"] --> L["16 x 16 structured byte lookup"]
     L --> S["parallel DiT-style segmentor"]
     S --> C["signed confidence in [-1, 1]"]
-    C --> T["fixed thresholds: transition 0.75 / cut 0.90"]
+    C --> T["fixed cut 0.90; transition 0.75 retained for diagnostics"]
     T --> H["hard chunks in forward"]
     C --> G["continuous soft boundary bridge in backward"]
     L --> H
     H --> M["parallel local memory summarizer"]
-    H --> R["readout interpreter with logic-transition prior"]
+    H --> R["chunk-local readout interpreter"]
     M --> N["dense no-self memory attention"]
     N --> R
     R --> Z["latent readout for external backbone"]
@@ -27,17 +27,17 @@ flowchart TD
 必须保持：
 
 1. segmentor 是并行 DiT 风格上下文模型，不是逐字节 MLP。
-2. `tau_cut=0.90`、`tau_trans=0.75` 固定，不学习阈值。
+2. `tau_cut=0.90` 固定用于执行切分；`tau_trans=0.75` 固定保留为诊断阈值，不再驱动 interpreter 的逻辑转折先验。
 3. 前向采用硬切分；反向通过连续置信度的软分配桥更新 segmentor。
 4. UTF-8 continuation byte 永远禁止切分，其置信度先验目标为 `-1`。
 5. 标点和空白是弱先验，置信度目标为 `0.5`；其余字符级候选边界只约束均值接近 `0`。
 6. chunk payload 从结构化 byte lookup 构建，不直接把 segmentor 隐状态冒充语义 payload。
-7. 逻辑转折标记进入 interpreter 作为弱先验，不进入 byte lookup 本身。
+7. 逻辑转折向量注入已退役：历史 ROI 中没有实际激活，边界置信度仍保留为训练信号和诊断量。
 8. 每个 chunk 的 local memory 只由当前 chunk 内容并行产生；memory 之间不串行更新。
 9. interpreter 可看其他 chunk 的 memory，但屏蔽当前 chunk 自身的 memory；默认使用稠密注意力，不使用 top-k。
 10. decoder 只执行 readout 到 byte 的逆翻译，不直接读取 memory。
 11. 严格补全任务必须先在原始 byte 输入上 mask，FLUED 不得接触 clean 输入。
-12. memory 内容暂不加直接目标；只把 interpreter 的 memory 使用门控约束在 `0.20-0.50`。
+12. memory 内容暂不加直接标签；固定使用率区间损失已退役，memory 由重建和严格补全主任务塑形。
 13. 历史探针曾错误地最大化全局 readout 分散度；该损失已废止。当前采用 byte 位置的前缀边际编码率，并在固定/长度分桶 chunk 预算内 Top-K 选边界。
 14. `128 byte/chunk` 是无损硬兜底；超出 chunk 容量的请求切分在执行前被裁掉，但连续置信度和请求切分率仍保留用于训练与诊断，禁止通过截断文本处理溢出。
 15. 每个 chunk 产生 1 个必开的 fallback readout 和最多 15 个 extra readout；emit controller 使用硬前向、连续直通反传。
@@ -79,7 +79,7 @@ D(E(x_observed)) = x_observed
 
 ### Readout 与 memory
 
-memory 暂不接受内容标签、与 readout 的直接相似度或信息量比例监督。memory 只由主任务缓慢塑形，另用区间损失把 interpreter 的 memory 使用门控约束在 20%-50%。
+memory 暂不接受内容标签、与 readout 的直接相似度或信息量比例监督。memory 由重建和严格补全主任务塑形；日志记录实际注意力、上下文范数和干预结果，但不再用固定 20%-50% 区间损失强拉使用率。
 
 readout emit 的监督值为：
 
@@ -122,9 +122,10 @@ extra value
 - 矩阵：`configs/v3_4/v34_pos_ar_40m_probe.json`
 - 启动器：`tools/launcher/v3_4/run_v34_pos_ar_matrix.py`
 - 回归测试：`tests/test_v34_architecture.py`
-- 本轮 FLUED 约 36.3M 参数，临时 backbone 约 4.6M，总计约 40.9M。
+- 当前 P4 配置的 FLUED 为 38,312,983 参数，临时 backbone 为 4,783,232 参数，总计 43,096,215。
 - 这是约 1/10 规模的结构筛选，不是 v3.4 最终 300M-400M 训练结论。
+- 当前推荐直接配置：`configs/v3_4/v34_default_38m_20k.json`。裸命令行默认值为兼容旧 checkpoint 保留，不代表当前推荐架构。
 
 ## 7. 组件消融
 
-在完整的 RoPE + 小自回归组上继续逐项关闭：跨 chunk memory、逻辑转折弱先验、软边界反传桥、边界专用先验、编码率约束、memory 使用区间约束、backbone 补全主任务和单步扩散噪声；另将 `16 x 16` 结构化字节表替换为普通 258 项 lookup。消融只关闭执行路径或损失，两套 lookup 和其他相关参数仍全部实例化；完整组复用位置/小自回归矩阵中的同种子结果。
+历史 5K 矩阵逐项关闭跨 chunk memory、软边界反传桥、边界专用先验、编码率、backbone 补全、单步扩散噪声和结构化字节表。logic-transition 与固定 memory 使用率已从当前实现基线退役。位置和 memory 的当前默认值由 2026-07-13 的 P0-P4 严格串行实验确定：segmentor 在 RoPE 上叠加提示级双向 ALiBi，P0 测量的是 ALiBi 的增量而非纯替代；chunk 内保留 RoPE；other-memory 使用 chunk-index RoPE，经无仿射 LayerNorm 后以固定 `0.10` 残差进入 interpreter；当前 chunk memory 默认关闭。

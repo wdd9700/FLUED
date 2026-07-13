@@ -1,6 +1,6 @@
 # FLUED v3.4 位置/小自回归与组件消融结果
 
-> 历史 pilot：本文主要来自 1K 步早期实验。当前判断以 `FLUED_V3_4_5K_ABLATION_ANALYSIS_20260711_CN.md` 为准；早期收敛速度不能代表 5K 上限和真实计算控制。
+> 历史 pilot：本文主要来自 1K 步早期实验，只用于保留初期现象。当前判断以 [`FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md`](FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md) 为准；早期收敛速度不能代表长期上限和真实计算控制。
 
 ## 1. 实验口径
 

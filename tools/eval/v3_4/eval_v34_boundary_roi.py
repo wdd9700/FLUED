@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from flued.data import PAD_ID, text_to_byte_ids  # noqa: E402
+from flued.v34.model import load_v34_state_dict_compatible  # noqa: E402
 from tools.train.v3_4.train_v34_pos_ar_probe import apply_boundary_curriculum, build_model  # noqa: E402
 
 
@@ -35,12 +36,17 @@ DEFAULT_MODEL = {
     "use_position": True,
     "position_strategy": "layered_rope",
     "prompt_position_scale": 0.1,
+    "use_prompt_alibi": False,
     "use_ar": True,
     "use_structured_lookup": True,
     "use_memory": True,
     "use_boundary_bridge": False,
     "memory_use_position": True,
+    "memory_position_mode": "legacy",
     "memory_residual_scale": 0.1,
+    "memory_access_mode": "other_only",
+    "current_memory_mode": "off",
+    "current_memory_scale": 0.03,
     "boundary_mode": "threshold",
     "boundary_coding_rate_dim": 16,
     "boundary_coding_rate_epsilon": 1.0,
@@ -107,10 +113,8 @@ def load_model(checkpoint_text: str, model_args: dict[str, Any], device: torch.d
             raise KeyError("checkpoint must contain 'model' or 'model_state_dict'")
     model = build_model(Namespace(**args)).to(device).eval()
     if checkpoint_text:
-        missing, unexpected = model.load_state_dict(state, strict=False)
-        unexpected = [name for name in unexpected if name != "logic_transition_prior"]
-        if missing or unexpected:
-            raise RuntimeError(f"checkpoint/model mismatch: missing={missing}, unexpected={unexpected}")
+        compatibility = load_v34_state_dict_compatible(model, state)
+        metadata["checkpoint_compatibility"] = compatibility
         if runtime_boundary_state:
             model.config.boundary_mode = str(runtime_boundary_state["mode"])
             model.config.coding_rate_mode = str(runtime_boundary_state["coding_rate_mode"])

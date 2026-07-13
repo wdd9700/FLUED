@@ -58,12 +58,21 @@ def build_model(args: argparse.Namespace) -> FLUEDV34:
             use_position=args.use_position,
             position_strategy=getattr(args, "position_strategy", "layered_rope"),
             prompt_position_scale=getattr(args, "prompt_position_scale", 0.1),
+            use_prompt_alibi=getattr(args, "use_prompt_alibi", False),
             use_ar=args.use_ar,
             use_structured_lookup=args.use_structured_lookup,
             use_memory=args.use_memory,
             use_boundary_bridge=args.use_boundary_bridge,
             memory_use_position=getattr(args, "memory_use_position", True),
+            memory_position_mode=getattr(args, "memory_position_mode", "legacy"),
             memory_residual_scale=getattr(args, "memory_residual_scale", 0.1),
+            memory_context_norm=getattr(args, "memory_context_norm", "none"),
+            memory_scale_mode=getattr(args, "memory_scale_mode", "fixed"),
+            memory_scale_max=getattr(args, "memory_scale_max", 0.1),
+            memory_access_mode=getattr(args, "memory_access_mode", "other_only"),
+            current_memory_mode=getattr(args, "current_memory_mode", "off"),
+            current_memory_scale=getattr(args, "current_memory_scale", 0.03),
+            current_memory_scale_max=getattr(args, "current_memory_scale_max", 0.1),
             boundary_mode=getattr(args, "boundary_mode", "threshold"),
             coding_rate_dim=getattr(args, "boundary_coding_rate_dim", 16),
             coding_rate_epsilon=getattr(args, "boundary_coding_rate_epsilon", 1.0),
@@ -107,6 +116,11 @@ def apply_boundary_curriculum(model: FLUEDV34, args: argparse.Namespace, step: i
     model.config.coding_rate_mode = target_rate_mode
     model.config.boundary_blend_alpha = alpha
     model.coding_rate_selector.mode = target_rate_mode
+    # step_model owns auxiliary-loss accounting and historically read args.
+    # Keep both runtime views synchronized across curriculum transitions.
+    args.boundary_mode = active_mode
+    args.boundary_coding_rate_mode = target_rate_mode
+    args.boundary_blend_alpha = alpha
     return changed
 
 
@@ -245,6 +259,7 @@ def step_model(
     valid = clean.ne(PAD_ID)
     byte_mask = make_byte_mask(valid, args.mask_prob, args.mask_span_min, args.mask_span_max)
     src = clean.masked_fill(byte_mask, MASK_ID)
+    model.collect_memory_diagnostics = bool(collect_metrics)
     out = model(src)
 
     zero_mask = torch.zeros_like(byte_mask)
@@ -406,7 +421,17 @@ def step_model(
             "coding_rate": float(coding_rate.item()),
             "memory_gate_mean": float(memory_gate_mean.item()),
             "memory_context_norm": float(memory_context_norm.item()),
+            "memory_context_raw_norm": float(out.aux["memory_context_raw_norm"].item()),
+            "memory_effective_scale": float(out.aux["memory_effective_scale"].item()),
             "memory_residual_ratio": float(memory_residual_ratio.item()),
+            "memory_attention_current_share": float(out.aux["memory_attention_current_share"].item()),
+            "memory_attention_other_share": float(out.aux["memory_attention_other_share"].item()),
+            "current_channel_attention_share": float(out.aux["current_channel_attention_share"].item()),
+            "current_memory_context_norm": float(out.aux["current_memory_context_norm"].item()),
+            "current_memory_context_raw_norm": float(out.aux["current_memory_context_raw_norm"].item()),
+            "current_memory_effective_scale": float(out.aux["current_memory_effective_scale"].item()),
+            "current_memory_readout_cosine": float(out.aux["current_memory_readout_cosine"].item()),
+            "current_memory_contribution_share": float(out.aux["current_memory_contribution_share"].item()),
             "memory_usage_loss": float(memory_usage_loss.item()),
             "emit_value_loss": float(emit_value_loss.item()),
             "emit_value_mean": float(emit_value_mean.item()),
@@ -536,7 +561,14 @@ def run(args: argparse.Namespace) -> dict:
     if args.resume and latest_path.exists():
         resume_payload = torch.load(latest_path, map_location=device, weights_only=False)
         if "optimizer" in resume_payload and "scheduler" in resume_payload:
-            model.load_state_dict(resume_payload["model"])
+            try:
+                model.load_state_dict(resume_payload["model"])
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "training checkpoint is not exactly compatible with the current v3.4 model; "
+                    "start a new output directory or pass --no-resume. Evaluation tools allow "
+                    "only explicitly inactive legacy fields."
+                ) from exc
             backbone.load_state_dict(resume_payload["backbone"])
             optimizer.load_state_dict(resume_payload["optimizer"])
             scheduler.load_state_dict(resume_payload["scheduler"])
@@ -599,6 +631,11 @@ def run(args: argparse.Namespace) -> dict:
                 model, backbone, batch, args, device, collect_metrics=collect, global_step=step
             )
         loss.backward()
+        if collect and getattr(model, "_diagnostic_byte_input", None) is not None:
+            byte_grad = model._diagnostic_byte_input.grad
+            metrics["current_byte_input_grad_rms"] = (
+                float(byte_grad.float().square().mean().sqrt().item()) if byte_grad is not None else 0.0
+            )
         grad = nn.utils.clip_grad_norm_(params, args.grad_clip)
         optimizer.step()
         scheduler.step()
@@ -652,6 +689,9 @@ def run(args: argparse.Namespace) -> dict:
     }
     payload = checkpoint_payload(args.max_steps, result)
     torch.save(payload, latest_path)
+    final_milestone = out_dir / f"step_{args.max_steps:06d}.pt"
+    if not final_milestone.exists():
+        torch.save(payload, final_milestone)
     (out_dir / "summary.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
     return result
@@ -701,12 +741,33 @@ def parse_args() -> argparse.Namespace:
         default="layered_rope",
     )
     parser.add_argument("--prompt-position-scale", type=float, default=0.1)
+    parser.add_argument("--use-prompt-alibi", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--use-ar", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use-structured-lookup", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use-memory", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use-boundary-bridge", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--memory-use-position", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--memory-position-mode",
+        choices=["legacy", "none", "chunk_rope", "byte_alibi"],
+        default="legacy",
+    )
     parser.add_argument("--memory-residual-scale", type=float, default=0.1)
+    parser.add_argument("--memory-context-norm", choices=["none", "layernorm"], default="none")
+    parser.add_argument("--memory-scale-mode", choices=["fixed", "bounded"], default="fixed")
+    parser.add_argument("--memory-scale-max", type=float, default=0.1)
+    parser.add_argument(
+        "--memory-access-mode",
+        choices=["other_only", "all", "none"],
+        default="other_only",
+    )
+    parser.add_argument(
+        "--current-memory-mode",
+        choices=["off", "separate_detached", "separate_e2e"],
+        default="off",
+    )
+    parser.add_argument("--current-memory-scale", type=float, default=0.03)
+    parser.add_argument("--current-memory-scale-max", type=float, default=0.1)
     parser.add_argument(
         "--boundary-mode",
         choices=["threshold", "marginal_rate_topk", "uniform_budget", "uniform_l2_blend"],

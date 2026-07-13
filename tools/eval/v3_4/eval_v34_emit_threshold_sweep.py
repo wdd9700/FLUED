@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from flued.v34.model import load_v34_state_dict_compatible  # noqa: E402
 from tools.train.v3_3.train_v33 import LatentInfillBackbone, make_dataloaders  # noqa: E402
 from tools.train.v3_4.train_v34_pos_ar_probe import (  # noqa: E402
     apply_boundary_curriculum,
@@ -80,10 +81,7 @@ def run(cli: argparse.Namespace) -> dict[str, Any]:
 
     device = torch.device(cli.device if cli.device == "cpu" or torch.cuda.is_available() else "cpu")
     model = build_model(args).to(device)
-    missing, unexpected = model.load_state_dict(payload["model"], strict=False)
-    unexpected = [name for name in unexpected if name != "logic_transition_prior"]
-    if missing or unexpected:
-        raise RuntimeError(f"checkpoint/model mismatch: missing={missing}, unexpected={unexpected}")
+    compatibility = load_v34_state_dict_compatible(model, payload["model"])
     backbone = LatentInfillBackbone(
         args.d_model,
         args.backbone_hidden,
@@ -123,6 +121,7 @@ def run(cli: argparse.Namespace) -> dict[str, Any]:
     result = {
         "checkpoint": str(checkpoint),
         "checkpoint_step": int(payload.get("step", 0)),
+        "checkpoint_compatibility": compatibility,
         "use_memory": bool(args.use_memory),
         "eval_seed": cli.eval_seed,
         "max_eval_batches": cli.max_eval_batches,

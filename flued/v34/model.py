@@ -65,8 +65,26 @@ def _sinusoidal_position(seq: int, dim: int, device: torch.device, dtype: torch.
     return encoded.to(dtype)
 
 
+def _alibi_slopes(nhead: int, device: torch.device) -> torch.Tensor:
+    """Fixed geometric head slopes for bidirectional byte-distance ALiBi."""
+    head = torch.arange(1, nhead + 1, device=device, dtype=torch.float32)
+    return torch.pow(2.0, -8.0 * head / float(nhead))
+
+
+def _bidirectional_alibi_bias(
+    seq: int,
+    nhead: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    positions = torch.arange(seq, device=device, dtype=torch.float32)
+    distance = (positions[:, None] - positions[None, :]).abs()
+    slopes = _alibi_slopes(nhead, device)
+    return (-slopes[:, None, None] * distance[None]).to(dtype)
+
+
 class ParallelAttention(nn.Module):
-    def __init__(self, dim: int, nhead: int, use_rope: bool) -> None:
+    def __init__(self, dim: int, nhead: int, use_rope: bool, use_alibi: bool = False) -> None:
         super().__init__()
         if dim % nhead:
             raise ValueError("dim must be divisible by nhead")
@@ -74,6 +92,7 @@ class ParallelAttention(nn.Module):
         self.nhead = nhead
         self.head_dim = dim // nhead
         self.use_rope = bool(use_rope)
+        self.use_alibi = bool(use_alibi)
         self.qkv = nn.Linear(dim, dim * 3, bias=False)
         self.out = nn.Linear(dim, dim, bias=False)
 
@@ -87,7 +106,11 @@ class ParallelAttention(nn.Module):
             pos = torch.arange(seq, device=x.device)
             q = _rope(q, pos)
             k = _rope(k, pos)
-        mask = valid[:, None, None, :]
+        if self.use_alibi:
+            mask = _bidirectional_alibi_bias(seq, self.nhead, x.device, q.dtype).unsqueeze(0)
+            mask = mask.masked_fill(~valid[:, None, None, :], float("-inf"))
+        else:
+            mask = valid[:, None, None, :]
         y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         y = y.transpose(1, 2).reshape(bsz, seq, self.dim)
         return self.out(y) * valid.unsqueeze(-1).to(y.dtype)
@@ -101,10 +124,17 @@ class DiTStyleBlock(nn.Module):
     the one-shot deployment form.
     """
 
-    def __init__(self, dim: int, nhead: int, ffn_dim: int, use_rope: bool) -> None:
+    def __init__(
+        self,
+        dim: int,
+        nhead: int,
+        ffn_dim: int,
+        use_rope: bool,
+        use_alibi: bool = False,
+    ) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
-        self.attn = ParallelAttention(dim, nhead, use_rope)
+        self.attn = ParallelAttention(dim, nhead, use_rope, use_alibi)
         self.norm2 = nn.LayerNorm(dim)
         self.ff_in = nn.Linear(dim, ffn_dim * 2)
         self.ff_out = nn.Linear(ffn_dim, dim)
@@ -246,14 +276,27 @@ class QueryPool(nn.Module):
 
 
 class DenseNoSelfMemory(nn.Module):
-    def __init__(self, dim: int, nhead: int, use_position: bool = True) -> None:
+    def __init__(
+        self,
+        dim: int,
+        nhead: int,
+        use_position: bool = True,
+        position_mode: str | None = None,
+        access_mode: str = "other_only",
+    ) -> None:
         super().__init__()
         if dim % nhead:
             raise ValueError("dim must be divisible by nhead")
         self.dim = dim
         self.nhead = nhead
         self.head_dim = dim // nhead
-        self.use_position = bool(use_position)
+        self.position_mode = position_mode or ("chunk_rope" if use_position else "none")
+        if self.position_mode not in {"none", "chunk_rope", "byte_alibi"}:
+            raise ValueError("memory position_mode must be none, chunk_rope, or byte_alibi")
+        self.use_position = self.position_mode != "none"
+        if access_mode not in {"other_only", "all", "current_only", "none"}:
+            raise ValueError("memory access_mode must be other_only, all, current_only, or none")
+        self.access_mode = access_mode
         self.q = nn.Linear(dim, dim, bias=False)
         self.k = nn.Linear(dim, dim, bias=False)
         self.v = nn.Linear(dim, dim, bias=False)
@@ -264,6 +307,8 @@ class DenseNoSelfMemory(nn.Module):
         readout: torch.Tensor,
         memory: torch.Tensor,
         chunk_mask: torch.Tensor,
+        chunk_anchors: torch.Tensor | None = None,
+        diagnostics: bool = False,
     ) -> tuple[torch.Tensor, dict]:
         bsz, chunks, readouts, dim = readout.shape
         ranks = memory.size(2)
@@ -272,18 +317,54 @@ class DenseNoSelfMemory(nn.Module):
         v = self.v(memory).view(bsz, chunks * ranks, self.nhead, self.head_dim).transpose(1, 2)
         q_owner = torch.arange(chunks, device=readout.device).repeat_interleave(readouts)
         k_owner = torch.arange(chunks, device=readout.device).repeat_interleave(ranks)
-        if self.use_position:
+        if self.position_mode == "chunk_rope":
             q = _rope(q, q_owner)
             k = _rope(k, k_owner)
-        no_self = q_owner[:, None].ne(k_owner[None, :])
+        same_owner = q_owner[:, None].eq(k_owner[None, :])
+        if self.access_mode == "other_only":
+            owner_allowed = ~same_owner
+        elif self.access_mode == "current_only":
+            owner_allowed = same_owner
+        elif self.access_mode == "all":
+            owner_allowed = torch.ones_like(same_owner)
+        else:
+            owner_allowed = torch.zeros_like(same_owner)
         key_valid = chunk_mask.repeat_interleave(ranks, dim=1)
         query_valid = chunk_mask.repeat_interleave(readouts, dim=1)
-        allowed = no_self[None, None] & key_valid[:, None, None, :] & query_valid[:, None, :, None]
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed)
+        allowed = owner_allowed[None, None] & key_valid[:, None, None, :] & query_valid[:, None, :, None]
+        if self.position_mode == "byte_alibi":
+            if chunk_anchors is None:
+                raise ValueError("chunk_anchors are required for byte_alibi memory position")
+            q_anchor = chunk_anchors.repeat_interleave(readouts, dim=1)
+            k_anchor = chunk_anchors.repeat_interleave(ranks, dim=1)
+            distance = (q_anchor[:, :, None] - k_anchor[:, None, :]).abs().float()
+            slopes = _alibi_slopes(self.nhead, readout.device)
+            mask = (-slopes[None, :, None, None] * distance[:, None]).to(q.dtype)
+            mask = mask.masked_fill(~allowed, float("-inf"))
+        else:
+            mask = allowed
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        y = torch.nan_to_num(y)
         y = y.transpose(1, 2).reshape(bsz, chunks, readouts, dim)
         y = self.out(y) * chunk_mask.unsqueeze(-1).unsqueeze(-1).to(y.dtype)
+        current_share = y.new_zeros(())
+        other_share = y.new_zeros(())
+        if diagnostics:
+            score = torch.matmul(q.float(), k.float().transpose(-1, -2)) / math.sqrt(self.head_dim)
+            if self.position_mode == "byte_alibi":
+                # Match the actual attention logits above. Diagnostics must not
+                # silently report content-only weights for a distance-biased path.
+                score = score + (-slopes[None, :, None, None] * distance[:, None])
+            score = score.masked_fill(~allowed, float("-inf"))
+            weights = torch.nan_to_num(score.softmax(dim=-1))
+            query_weight = query_valid[:, None, :, None].float()
+            denom = query_weight.sum() * self.nhead
+            current_share = (weights * same_owner[None, None].float() * query_weight).sum() / denom.clamp(min=1.0)
+            other_share = (weights * (~same_owner)[None, None].float() * query_weight).sum() / denom.clamp(min=1.0)
         return y, {
-            "self_allowed": torch.zeros((), device=y.device),
+            "self_allowed": current_share,
+            "memory_attention_current_share": current_share,
+            "memory_attention_other_share": other_share,
             "visible_memory_slots": allowed[:, 0].float().sum(dim=-1),
         }
 
@@ -387,12 +468,21 @@ class FLUEDV34ProbeConfig:
     use_position: bool = True
     position_strategy: str = "layered_rope"
     prompt_position_scale: float = 0.1
+    use_prompt_alibi: bool = False
     use_ar: bool = True
     use_structured_lookup: bool = True
     use_memory: bool = True
     use_boundary_bridge: bool = True
     memory_use_position: bool = True
+    memory_position_mode: str = "legacy"
     memory_residual_scale: float = 0.1
+    memory_context_norm: str = "none"
+    memory_scale_mode: str = "fixed"
+    memory_scale_max: float = 0.1
+    memory_access_mode: str = "other_only"
+    current_memory_mode: str = "off"
+    current_memory_scale: float = 0.03
+    current_memory_scale_max: float = 0.1
     boundary_mode: str = "threshold"
     coding_rate_dim: int = 16
     coding_rate_epsilon: float = 1.0
@@ -446,7 +536,10 @@ class FLUEDV34Probe(nn.Module):
         self.use_prompt_position = strategy in {"prompt_additive", "prompt_plus_local_rope"}
         self.byte_lookup = StructuredByteLookup(c.d_model)
         self.segmentor_blocks = nn.ModuleList(
-            [DiTStyleBlock(c.d_model, c.nhead, c.ffn_dim, layer_rope) for _ in range(c.segmentor_layers)]
+            [
+                DiTStyleBlock(c.d_model, c.nhead, c.ffn_dim, layer_rope, c.use_prompt_alibi)
+                for _ in range(c.segmentor_layers)
+            ]
         )
         self.segmentor_head = nn.Sequential(nn.LayerNorm(c.d_model), nn.Linear(c.d_model, 1))
         self.policy = FixedDualThresholdPolicy(c.tau_cut, c.tau_trans)
@@ -454,10 +547,43 @@ class FLUEDV34Probe(nn.Module):
         self.boundary_bridge = SoftBoundaryBridge(c.max_chunks, c.tau_cut, c.boundary_temperature)
         self.memory_pool = QueryPool(c.d_model, c.memory_rank, c.nhead, layer_rope)
         self.readout_pool = QueryPool(c.d_model, c.readout_vectors, c.nhead, layer_rope)
+        memory_position_mode = c.memory_position_mode
+        if memory_position_mode == "legacy":
+            memory_position_mode = (
+                "chunk_rope" if strategy == "layered_rope" and c.memory_use_position else "none"
+            )
         self.memory_read = DenseNoSelfMemory(
             c.d_model,
             c.nhead,
-            strategy == "layered_rope" and c.memory_use_position,
+            position_mode=memory_position_mode,
+            access_mode=c.memory_access_mode,
+        )
+        self.current_memory_read = DenseNoSelfMemory(
+            c.d_model,
+            c.nhead,
+            position_mode="none",
+            access_mode="current_only",
+        )
+        if c.memory_context_norm not in {"none", "layernorm"}:
+            raise ValueError("memory_context_norm must be none or layernorm")
+        if c.memory_scale_mode not in {"fixed", "bounded"}:
+            raise ValueError("memory_scale_mode must be fixed or bounded")
+        if c.memory_scale_max <= 0 or c.current_memory_scale_max <= 0:
+            raise ValueError("memory scale maxima must be positive")
+        if not 0 <= c.memory_residual_scale <= c.memory_scale_max:
+            raise ValueError("memory_residual_scale must be within [0, memory_scale_max]")
+        if not 0 <= c.current_memory_scale <= c.current_memory_scale_max:
+            raise ValueError("current_memory_scale must be within [0, current_memory_scale_max]")
+        # These modules and scalars exist in every ablation so parameter counts
+        # stay comparable. LayerNorm is intentionally affine-free: it aligns
+        # context scale without adding another learned representation path.
+        self.memory_context_normalizer = nn.LayerNorm(c.d_model, elementwise_affine=False)
+        self.current_memory_context_normalizer = nn.LayerNorm(c.d_model, elementwise_affine=False)
+        self.memory_scale_logit = nn.Parameter(
+            torch.tensor(self._scale_to_logit(c.memory_residual_scale, c.memory_scale_max))
+        )
+        self.current_memory_scale_logit = nn.Parameter(
+            torch.tensor(self._scale_to_logit(c.current_memory_scale, c.current_memory_scale_max))
         )
         self.memory_gate = nn.Sequential(nn.LayerNorm(c.d_model * 2), nn.Linear(c.d_model * 2, c.d_model), nn.Sigmoid())
         self.interpreter_blocks = nn.ModuleList(
@@ -486,6 +612,22 @@ class FLUEDV34Probe(nn.Module):
             c.coding_rate_mode,
         )
         self.emit_controller = ReadoutEmitController(c.d_model, c.emit_initial_probability, c.emit_threshold)
+
+    @staticmethod
+    def _scale_to_logit(initial: float, maximum: float) -> float:
+        ratio = min(max(float(initial) / float(maximum), 1.0e-4), 1.0 - 1.0e-4)
+        return math.log(ratio / (1.0 - ratio))
+
+    @staticmethod
+    def _effective_scale(
+        mode: str,
+        fixed: float,
+        maximum: float,
+        logit: torch.Tensor,
+    ) -> torch.Tensor:
+        if mode == "bounded":
+            return logit.sigmoid() * float(maximum)
+        return logit.new_tensor(float(fixed))
 
     @staticmethod
     def _capacity_safe_cuts(
@@ -548,6 +690,9 @@ class FLUEDV34Probe(nn.Module):
         valid = token_ids.ne(PAD_ID)
         active_lookup = self.byte_lookup if c.use_structured_lookup else self.plain_byte_lookup
         x = active_lookup(token_ids)
+        if getattr(self, "collect_memory_diagnostics", False) and torch.is_grad_enabled():
+            x.retain_grad()
+            self._diagnostic_byte_input = x
         if self.use_prompt_position:
             prompt_position = _sinusoidal_position(
                 token_ids.size(1), c.d_model, x.device, x.dtype
@@ -661,21 +806,121 @@ class FLUEDV34Probe(nn.Module):
         else:
             ar_delta = readout.new_zeros(())
         if c.use_memory:
-            memory_ctx, mem_aux = self.memory_read(readout, memory, chunks.chunk_mask)
+            positions = torch.arange(token_ids.size(1), device=token_ids.device).view(1, -1).expand_as(token_ids)
+            valid_chunk_id = chunks.chunk_ids.ge(0)
+            safe_chunk_id = chunks.chunk_ids.clamp(min=0)
+            start = torch.full(
+                (token_ids.size(0), c.max_chunks),
+                token_ids.size(1),
+                device=token_ids.device,
+                dtype=torch.long,
+            )
+            end = torch.full_like(start, -1)
+            start.scatter_reduce_(
+                1,
+                safe_chunk_id,
+                torch.where(valid_chunk_id, positions, torch.full_like(positions, token_ids.size(1))),
+                reduce="amin",
+                include_self=True,
+            )
+            end.scatter_reduce_(
+                1,
+                safe_chunk_id,
+                torch.where(valid_chunk_id, positions, torch.full_like(positions, -1)),
+                reduce="amax",
+                include_self=True,
+            )
+            chunk_anchors = 0.5 * (start.float() + end.clamp(min=0).float())
+            diagnostics = bool(getattr(self, "collect_memory_diagnostics", False))
+            memory_ctx, mem_aux = self.memory_read(
+                readout,
+                memory,
+                chunks.chunk_mask,
+                chunk_anchors=chunk_anchors,
+                diagnostics=diagnostics,
+            )
+            memory_ctx_raw = memory_ctx
+            if c.memory_context_norm == "layernorm":
+                memory_ctx = self.memory_context_normalizer(memory_ctx)
+            memory_scale = self._effective_scale(
+                c.memory_scale_mode,
+                c.memory_residual_scale,
+                c.memory_scale_max,
+                self.memory_scale_logit,
+            )
             # The controller chooses how strongly each channel reads global
             # context; a bounded residual scale keeps local translation primary.
             gate = self.memory_gate(torch.cat([readout, memory_ctx], dim=-1).detach())
-            memory_residual = gate * memory_ctx * float(c.memory_residual_scale)
+            other_residual = gate * memory_ctx * memory_scale.to(memory_ctx.dtype)
+            if c.current_memory_mode in {"separate_detached", "separate_e2e"}:
+                current_source = memory.detach() if c.current_memory_mode == "separate_detached" else memory
+                current_ctx, current_aux = self.current_memory_read(
+                    readout,
+                    current_source,
+                    chunks.chunk_mask,
+                    chunk_anchors=chunk_anchors,
+                    diagnostics=diagnostics,
+                )
+                current_ctx_raw = current_ctx
+                if c.memory_context_norm == "layernorm":
+                    current_ctx = self.current_memory_context_normalizer(current_ctx)
+                current_scale = self._effective_scale(
+                    c.memory_scale_mode,
+                    c.current_memory_scale,
+                    c.current_memory_scale_max,
+                    self.current_memory_scale_logit,
+                )
+                current_residual = current_ctx * current_scale.to(current_ctx.dtype)
+            elif c.current_memory_mode == "off":
+                current_ctx = torch.zeros_like(readout)
+                current_ctx_raw = torch.zeros_like(readout)
+                current_residual = torch.zeros_like(readout)
+                current_scale = self._effective_scale(
+                    c.memory_scale_mode,
+                    c.current_memory_scale,
+                    c.current_memory_scale_max,
+                    self.current_memory_scale_logit,
+                )
+                current_aux = {
+                    "memory_attention_current_share": readout.new_zeros(()),
+                    "memory_attention_other_share": readout.new_zeros(()),
+                }
+            else:
+                raise ValueError(f"unknown current_memory_mode: {c.current_memory_mode}")
+            memory_residual = other_residual + current_residual
             readout = readout + memory_residual
         else:
             memory_ctx = torch.zeros_like(readout)
+            memory_ctx_raw = torch.zeros_like(readout)
+            current_ctx = torch.zeros_like(readout)
+            current_ctx_raw = torch.zeros_like(readout)
+            other_residual = torch.zeros_like(readout)
+            current_residual = torch.zeros_like(readout)
             memory_residual = torch.zeros_like(readout)
+            memory_scale = self._effective_scale(
+                c.memory_scale_mode,
+                c.memory_residual_scale,
+                c.memory_scale_max,
+                self.memory_scale_logit,
+            )
+            current_scale = self._effective_scale(
+                c.memory_scale_mode,
+                c.current_memory_scale,
+                c.current_memory_scale_max,
+                self.current_memory_scale_logit,
+            )
             gate = readout.new_zeros(readout.shape)
             mem_aux = {
                 "self_allowed": readout.new_zeros(()),
+                "memory_attention_current_share": readout.new_zeros(()),
+                "memory_attention_other_share": readout.new_zeros(()),
                 "visible_memory_slots": readout.new_zeros(
                     readout.size(0), c.max_chunks * c.readout_vectors
                 ),
+            }
+            current_aux = {
+                "memory_attention_current_share": readout.new_zeros(()),
+                "memory_attention_other_share": readout.new_zeros(()),
             }
         # Interpreter refinement is local to each chunk. Cross-chunk context
         # is available only through the explicit no-self memory path above.
@@ -715,10 +960,30 @@ class FLUEDV34Probe(nn.Module):
             aux={
                 **mem_aux,
                 "memory_gate_mean": gate[chunks.chunk_mask.unsqueeze(-1).expand_as(gate[..., 0])].mean() if chunks.chunk_mask.any() else gate.new_zeros(()),
+                "memory_context_raw_norm": memory_ctx_raw[chunks.chunk_mask].float().norm(dim=-1).mean() if chunks.chunk_mask.any() else gate.new_zeros(()),
                 "memory_context_norm": memory_ctx[chunks.chunk_mask].float().norm(dim=-1).mean() if chunks.chunk_mask.any() else gate.new_zeros(()),
+                "memory_effective_scale": memory_scale.float(),
                 "memory_residual_ratio": (
                     memory_residual[chunks.chunk_mask].float().norm(dim=-1).mean()
                     / readout_candidates[chunks.chunk_mask].detach().float().norm(dim=-1).mean().clamp(min=1.0e-6)
+                    if chunks.chunk_mask.any() else gate.new_zeros(())
+                ),
+                "memory_attention_current_share": mem_aux["memory_attention_current_share"],
+                "memory_attention_other_share": mem_aux["memory_attention_other_share"],
+                "current_channel_attention_share": current_aux["memory_attention_current_share"],
+                "current_memory_context_raw_norm": current_ctx_raw[chunks.chunk_mask].float().norm(dim=-1).mean() if chunks.chunk_mask.any() else gate.new_zeros(()),
+                "current_memory_context_norm": current_ctx[chunks.chunk_mask].float().norm(dim=-1).mean() if chunks.chunk_mask.any() else gate.new_zeros(()),
+                "current_memory_effective_scale": current_scale.float(),
+                "current_memory_readout_cosine": (
+                    F.cosine_similarity(current_ctx[chunks.chunk_mask].float(), readout_candidates[chunks.chunk_mask].detach().float(), dim=-1).mean()
+                    if chunks.chunk_mask.any() else gate.new_zeros(())
+                ),
+                "current_memory_contribution_share": (
+                    current_residual[chunks.chunk_mask].float().norm(dim=-1).mean()
+                    / (
+                        current_residual[chunks.chunk_mask].float().norm(dim=-1).mean()
+                        + other_residual[chunks.chunk_mask].float().norm(dim=-1).mean()
+                    ).clamp(min=1.0e-6)
                     if chunks.chunk_mask.any() else gate.new_zeros(())
                 ),
                 "requested_hard_cut": requested_hard_cut,
@@ -737,3 +1002,44 @@ class FLUEDV34Probe(nn.Module):
 # scale is controlled only by FLUEDV34Config fields and training configuration.
 FLUEDV34Config = FLUEDV34ProbeConfig
 FLUEDV34 = FLUEDV34Probe
+
+
+def load_v34_state_dict_compatible(
+    model: FLUEDV34Probe,
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, list[str]]:
+    """Load an evaluation checkpoint without hiding active-path mismatches.
+
+    P3 added two scalar parameters, and P2 added an optional current-memory
+    reader. Older checkpoints may omit them while their corresponding paths are
+    disabled. Evaluation may safely retain the freshly initialized inactive
+    values; any mismatch on an active path remains a hard error.
+    """
+
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    ignored_missing: list[str] = []
+    unresolved_missing: list[str] = []
+    for name in missing:
+        inactive_fixed_scale = (
+            model.config.memory_scale_mode == "fixed"
+            and name in {"memory_scale_logit", "current_memory_scale_logit"}
+        )
+        inactive_current_reader = (
+            model.config.current_memory_mode == "off"
+            and name.startswith("current_memory_read.")
+        )
+        if inactive_fixed_scale or inactive_current_reader:
+            ignored_missing.append(name)
+        else:
+            unresolved_missing.append(name)
+    ignored_unexpected = [name for name in unexpected if name == "logic_transition_prior"]
+    unresolved_unexpected = [name for name in unexpected if name not in ignored_unexpected]
+    if unresolved_missing or unresolved_unexpected:
+        raise RuntimeError(
+            "checkpoint/model mismatch: "
+            f"missing={unresolved_missing}, unexpected={unresolved_unexpected}"
+        )
+    return {
+        "ignored_missing": ignored_missing,
+        "ignored_unexpected": ignored_unexpected,
+    }

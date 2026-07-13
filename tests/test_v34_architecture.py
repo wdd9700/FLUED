@@ -8,7 +8,15 @@ import torch
 import torch.nn.functional as F
 
 from flued.data import text_to_byte_ids
-from flued.v34.model import FLUEDV34Probe, FLUEDV34ProbeConfig, SpanDecoder, _sinusoidal_position
+from flued.v34.model import (
+    DenseNoSelfMemory,
+    FLUEDV34Probe,
+    FLUEDV34ProbeConfig,
+    SpanDecoder,
+    _bidirectional_alibi_bias,
+    _sinusoidal_position,
+    load_v34_state_dict_compatible,
+)
 from flued.v34.rate_emit import MarginalCodingRateSelector, ReadoutEmitController
 from tools.train.v3_4.train_v34_pos_ar_probe import apply_boundary_curriculum
 
@@ -216,6 +224,8 @@ def test_v34_boundary_curriculum_switches_once_at_requested_step() -> None:
     assert apply_boundary_curriculum(model, args, 3)
     assert model.config.boundary_mode == "marginal_rate_topk"
     assert model.coding_rate_selector.mode == "l2"
+    assert args.boundary_mode == "marginal_rate_topk"
+    assert args.boundary_coding_rate_mode == "l2"
     assert not apply_boundary_curriculum(model, args, 4)
 
 
@@ -231,6 +241,8 @@ def test_v34_boundary_curriculum_blends_scores_before_final_l2() -> None:
     assert apply_boundary_curriculum(model, args, 3)
     assert model.config.boundary_mode == "uniform_l2_blend"
     assert model.config.boundary_blend_alpha == 0.0
+    assert args.boundary_mode == "uniform_l2_blend"
+    assert args.boundary_blend_alpha == 0.0
     assert not apply_boundary_curriculum(model, args, 4)
     assert model.config.boundary_blend_alpha == pytest.approx(0.5)
     assert apply_boundary_curriculum(model, args, 5)
@@ -389,3 +401,255 @@ def test_v34_prompt_plus_local_rope_keeps_local_order_without_chunk_rope() -> No
     assert model.readout_pool.use_position is True
     assert model.interpreter_blocks[0].attn.use_rope is True
     assert model.memory_read.use_position is False
+
+
+def test_v34_bidirectional_alibi_is_symmetric_and_distance_monotonic() -> None:
+    bias = _bidirectional_alibi_bias(8, 4, torch.device("cpu"), torch.float32)
+    assert torch.equal(bias, bias.transpose(-1, -2))
+    assert torch.all(bias[:, 0, 0] > bias[:, 0, 1])
+    assert torch.all(bias[:, 0, 1] > bias[:, 0, 7])
+
+
+def test_v34_byte_alibi_diagnostics_include_distance_bias() -> None:
+    memory_read = DenseNoSelfMemory(
+        dim=4,
+        nhead=1,
+        position_mode="byte_alibi",
+        access_mode="all",
+    )
+    torch.nn.init.zeros_(memory_read.q.weight)
+    torch.nn.init.zeros_(memory_read.k.weight)
+    readout = torch.zeros(1, 2, 1, 4)
+    memory = torch.zeros(1, 2, 1, 4)
+    chunk_mask = torch.ones(1, 2, dtype=torch.bool)
+    _, aux = memory_read(
+        readout,
+        memory,
+        chunk_mask,
+        chunk_anchors=torch.tensor([[0.0, 100.0]]),
+        diagnostics=True,
+    )
+    assert aux["memory_attention_current_share"].item() > 0.5
+
+
+def test_v34_legacy_loader_allows_only_inactive_missing_paths() -> None:
+    model = FLUEDV34Probe(
+        FLUEDV34ProbeConfig(
+            d_model=32,
+            nhead=4,
+            ffn_dim=64,
+            segmentor_layers=1,
+            interpreter_layers=1,
+            memory_rank=2,
+            readout_vectors=2,
+            ar_hidden=8,
+            memory_scale_mode="fixed",
+            current_memory_mode="off",
+        )
+    )
+    state = model.state_dict()
+    removed = {
+        "memory_scale_logit",
+        "current_memory_scale_logit",
+        *{name for name in state if name.startswith("current_memory_read.")},
+    }
+    legacy = {name: tensor for name, tensor in state.items() if name not in removed}
+    report = load_v34_state_dict_compatible(model, legacy)
+    assert set(report["ignored_missing"]) == removed
+
+    active_current = FLUEDV34Probe(
+        FLUEDV34ProbeConfig(
+            d_model=32,
+            nhead=4,
+            ffn_dim=64,
+            segmentor_layers=1,
+            interpreter_layers=1,
+            memory_rank=2,
+            readout_vectors=2,
+            ar_hidden=8,
+            memory_scale_mode="fixed",
+            current_memory_mode="separate_e2e",
+        )
+    )
+    with pytest.raises(RuntimeError, match="checkpoint/model mismatch"):
+        load_v34_state_dict_compatible(active_current, legacy)
+
+
+def test_v34_prompt_alibi_only_affects_segmentor_attention() -> None:
+    model = FLUEDV34Probe(
+        FLUEDV34ProbeConfig(
+            d_model=32,
+            nhead=4,
+            ffn_dim=64,
+            segmentor_layers=1,
+            interpreter_layers=1,
+            memory_rank=2,
+            readout_vectors=2,
+            ar_hidden=8,
+            use_prompt_alibi=True,
+            max_chunks=4,
+            max_span=16,
+        )
+    )
+    assert model.segmentor_blocks[0].attn.use_alibi
+    assert not model.interpreter_blocks[0].attn.use_alibi
+
+
+@pytest.mark.parametrize("mode", ["none", "chunk_rope", "byte_alibi"])
+def test_v34_memory_position_modes_are_finite(mode: str) -> None:
+    model = FLUEDV34Probe(
+        FLUEDV34ProbeConfig(
+            d_model=32,
+            nhead=4,
+            ffn_dim=64,
+            segmentor_layers=1,
+            interpreter_layers=1,
+            memory_rank=2,
+            readout_vectors=2,
+            ar_hidden=8,
+            use_memory=True,
+            memory_position_mode=mode,
+            boundary_mode="uniform_budget",
+            bytes_per_chunk_budget=8,
+            max_chunks=4,
+            max_span=16,
+            noise_scale=0.0,
+        )
+    ).eval()
+    ids = torch.tensor([text_to_byte_ids("abcdefghABCDEFGH")])
+    with torch.no_grad():
+        out = model(ids)
+    assert torch.isfinite(out.readout_z).all()
+    assert model.memory_read.position_mode == mode
+
+
+@pytest.mark.parametrize(
+    ("access_mode", "current_mode"),
+    [
+        ("other_only", "off"),
+        ("all", "off"),
+        ("other_only", "separate_detached"),
+        ("other_only", "separate_e2e"),
+        ("none", "separate_e2e"),
+    ],
+)
+def test_v34_current_memory_paths_are_finite(access_mode: str, current_mode: str) -> None:
+    model = FLUEDV34Probe(
+        FLUEDV34ProbeConfig(
+            d_model=32,
+            nhead=4,
+            ffn_dim=64,
+            segmentor_layers=1,
+            interpreter_layers=1,
+            memory_rank=2,
+            readout_vectors=2,
+            ar_hidden=8,
+            use_memory=True,
+            memory_access_mode=access_mode,
+            current_memory_mode=current_mode,
+            boundary_mode="uniform_budget",
+            bytes_per_chunk_budget=8,
+            max_chunks=4,
+            max_span=16,
+            noise_scale=0.0,
+        )
+    ).eval()
+    ids = torch.tensor([text_to_byte_ids("abcdefghABCDEFGH")])
+    with torch.no_grad():
+        out = model(ids)
+    assert torch.isfinite(out.readout_z).all()
+
+
+def test_v34_current_memory_modules_keep_parameter_count_constant() -> None:
+    configs = [
+        FLUEDV34ProbeConfig(memory_access_mode="other_only", current_memory_mode="off"),
+        FLUEDV34ProbeConfig(memory_access_mode="all", current_memory_mode="off"),
+        FLUEDV34ProbeConfig(memory_access_mode="other_only", current_memory_mode="separate_detached"),
+        FLUEDV34ProbeConfig(memory_access_mode="other_only", current_memory_mode="separate_e2e"),
+        FLUEDV34ProbeConfig(memory_access_mode="none", current_memory_mode="separate_e2e"),
+    ]
+    counts = {sum(parameter.numel() for parameter in FLUEDV34Probe(config).parameters()) for config in configs}
+    assert len(counts) == 1
+
+
+@pytest.mark.parametrize(
+    ("context_norm", "scale_mode"),
+    [("none", "fixed"), ("layernorm", "fixed"), ("layernorm", "bounded")],
+)
+def test_v34_memory_scale_paths_are_finite(context_norm: str, scale_mode: str) -> None:
+    model = FLUEDV34Probe(
+        FLUEDV34ProbeConfig(
+            d_model=32,
+            nhead=4,
+            ffn_dim=64,
+            segmentor_layers=1,
+            interpreter_layers=1,
+            memory_rank=2,
+            readout_vectors=2,
+            ar_hidden=8,
+            use_memory=True,
+            memory_access_mode="other_only",
+            current_memory_mode="separate_detached",
+            memory_context_norm=context_norm,
+            memory_scale_mode=scale_mode,
+            memory_residual_scale=0.03 if scale_mode == "bounded" else 0.1,
+            current_memory_scale=0.03,
+            boundary_mode="uniform_budget",
+            bytes_per_chunk_budget=8,
+            max_chunks=4,
+            max_span=16,
+            noise_scale=0.0,
+        )
+    )
+    ids = torch.tensor([text_to_byte_ids("abcdefghABCDEFGH")])
+    out = model(ids)
+    assert torch.isfinite(out.readout_z).all()
+    assert -1.0e-6 <= out.aux["memory_effective_scale"].item() <= 0.100001
+    assert -1.0e-6 <= out.aux["current_memory_effective_scale"].item() <= 0.100001
+    if context_norm == "layernorm":
+        assert out.aux["memory_context_norm"].item() == pytest.approx(32**0.5, rel=0.05)
+        assert out.aux["current_memory_context_norm"].item() == pytest.approx(32**0.5, rel=0.05)
+
+
+def test_v34_bounded_memory_scales_receive_gradients() -> None:
+    model = FLUEDV34Probe(
+        FLUEDV34ProbeConfig(
+            d_model=32,
+            nhead=4,
+            ffn_dim=64,
+            segmentor_layers=1,
+            interpreter_layers=1,
+            memory_rank=2,
+            readout_vectors=2,
+            ar_hidden=8,
+            use_memory=True,
+            current_memory_mode="separate_detached",
+            memory_context_norm="layernorm",
+            memory_scale_mode="bounded",
+            memory_residual_scale=0.03,
+            current_memory_scale=0.03,
+            boundary_mode="uniform_budget",
+            bytes_per_chunk_budget=8,
+            max_chunks=4,
+            max_span=16,
+            noise_scale=0.0,
+        )
+    )
+    ids = torch.tensor([text_to_byte_ids("abcdefghABCDEFGH")])
+    model(ids).byte_logits.float().square().mean().backward()
+    assert model.memory_scale_logit.grad is not None
+    assert model.current_memory_scale_logit.grad is not None
+
+
+def test_v34_memory_scale_ablation_parameter_count_is_constant() -> None:
+    configs = [
+        FLUEDV34ProbeConfig(memory_context_norm="none", memory_scale_mode="fixed"),
+        FLUEDV34ProbeConfig(memory_context_norm="layernorm", memory_scale_mode="fixed"),
+        FLUEDV34ProbeConfig(
+            memory_context_norm="layernorm",
+            memory_scale_mode="bounded",
+            memory_residual_scale=0.03,
+        ),
+    ]
+    counts = {sum(parameter.numel() for parameter in FLUEDV34Probe(config).parameters()) for config in configs}
+    assert len(counts) == 1

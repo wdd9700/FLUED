@@ -7,8 +7,9 @@
 1. [研究回顾](research/FLUED_RESEARCH_RETROSPECTIVE_CN.md)：从 v1 到 v3.3 的问题、失败和设计转向。
 2. [v3.4 实现基线](versions/v3.4/FLUED_V3_4_IMPLEMENTATION_BASELINE_CN.md)：当前可运行架构。
 3. [v3.4 编码率与发声控制修正](versions/v3.4/FLUED_V3_4_RATE_EMIT_CORRECTION_20260710_CN.md)：边界与计算预算的修正。
-4. [v3.4 5K 消融分析](versions/v3.4/FLUED_V3_4_5K_ABLATION_ANALYSIS_20260711_CN.md)：当前最完整的实验结论。
-5. [公开训练日志](../results/v3.4/5k_ablation/README.md)：原始曲线、数值摘要和交互图。
+4. [v3.4 5K 消融分析](versions/v3.4/FLUED_V3_4_5K_ABLATION_ANALYSIS_20260711_CN.md)：冻结的短程筛选结论。
+5. [v3.4 20K 位置/Memory 分析](versions/v3.4/FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md)：当前规范结论。
+6. [P3/P4 公开日志](../results/v3.4/memory_position_20k_20260713/README.md)：完整训练曲线、配置和阈值轨迹。
 
 ## 版本目录
 
@@ -35,7 +36,7 @@
 
 ## 证据口径
 
-- **当前可直接引用**：v2 三种子、D1 2048-byte/100K、公平 masked-source v3.2.1、v3.4 5K 单种子消融。
+- **当前可直接引用**：v2 三种子、D1 2048-byte/100K、公平 masked-source v3.2.1、v3.4 20K 单种子配对实验。
 - **研究附录可引用**：v1 历史 E3、v3.1 ROI、早期 memory 机制测试。
 - **反例**：latent consistency 爆炸、固定压缩权重 NaN、clean encode 后再 mask 造成的信息泄露。
 - **未完成 claim**：v3.4 尚未完成多种子、300M、4096-byte 和同算力外部系统比较。

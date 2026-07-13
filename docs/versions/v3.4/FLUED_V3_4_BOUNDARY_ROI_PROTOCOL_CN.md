@@ -51,7 +51,7 @@ python tools/analysis/v3_4/render_v34_boundary_roi.py `
 | `requested_model_boundary` | 策略或 coding-rate selector 请求的 hard cut，包含可能因容量而未执行的请求。 |
 | `model_hard_boundary` | `out.policy.hard_cut`，即经过 v3.4 policy 和容量安全处理后交给 `ChunkBuilder` 的模型 hard cut。第一个有效 byte 也会作为 chunk 起点。 |
 | `hard_chunk_boundary` | 从 `chunk_id`/`chunk_offset==0` 提取的实际可执行 chunk 起点，包含模型边界和自动边界。 |
-| `logic_transition` | v3.4 两阈值策略中的 `tau_trans < confidence <= tau_cut` soft transition；它不是 hard cut。 |
+| `logic_transition` | 两阈值策略中的历史/诊断字段：`tau_trans < confidence <= tau_cut`。它不是 hard cut，当前 interpreter 也不再注入 logic-transition 向量。 |
 | `utf8_continuation` | raw byte 在 `0x80..0xBF` 的 UTF-8 continuation。v3.4 policy 会禁止这些位置成为 model hard cut。 |
 | `forced_max_span_boundary` | 实际 chunk 起点但不是 model hard boundary，通常由 `ChunkBuilder` 在累计 slot 达到 `max_span` 时插入。它是预算/容量边界，不应解释成模型学到的语义边界。 |
 | `force_continue` | 模型输出的结构性 continuation 保护；当前 v3.4 主要由 UTF-8 continuation guard 贡献。 |

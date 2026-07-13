@@ -1,5 +1,7 @@
 # FLUED v3.4 渐进课程、Memory 20K 与边界 ROI 审计
 
+> 历史反例：本文发生在全局 interpreter 路径和 memory 尺度纠偏之前。其负结果用于解释为什么必须重做路径审计，不代表当前 no-self normalized memory。当前结论见 [`FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md`](FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md)。
+
 ## 1. 实验范围
 
 本轮只回答三个问题：
@@ -42,18 +44,18 @@
 | 10000-15000 | 75.56% | 84.40% | 0.5668 | 0.5709 |
 | 15000-20000 | 77.48% | 84.27% | 0.4436 | 0.5158 |
 
-结论：渐进迁移消除了硬切换第一瞬间的巨大跌落，但没有保留均匀预热的最终任务优势。L2 权重超过约一半后仍会重排表示，最终结果接近纯 L2 的压缩优先解。**渐进课程不能成为新默认；旧硬切换仍是当前任务质量更好的参考路线。**
+本轮结论：渐进迁移消除了硬切换第一瞬间的巨大跌落，但没有保留均匀预热的最终任务优势。L2 权重超过约一半后仍会重排表示，最终结果接近纯 L2 的压缩优先解。**在这条旧路径中，渐进课程不能成为新默认；旧硬切换是当时任务质量更好的参考路线。**
 
-## 3. Memory 结论
+## 3. 本轮旧路径的 Memory 结论
 
-20K 配对实验不支持“memory 提高 readout 精度并降低 backbone 困惑度”：
+这轮纠偏前的 20K 配对不支持“memory 提高 readout 精度并降低 backbone 困惑度”：
 
 - memory 使实际 latent/byte 降低约 19.8%；
 - 但重建下降 9.28 个百分点；
 - 补全下降 1.55 个百分点；
 - 补全困惑度上升约 23.8%。
 
-当前 memory 更像一种隐式压缩压力：interpreter 使用 memory 后，emit controller 倾向于关闭更多额外 readout，但剩余表示不足以补偿任务损失。memory 仍可能在长上下文、实体和代码专用任务上有价值，但在当前通用 512-byte 任务中不应默认开启。
+在本轮 progressive/旧路径中，memory 更像一种隐式压缩压力：interpreter 使用 memory 后，emit controller 倾向于关闭更多额外 readout，但剩余表示不足以补偿任务损失。该判断已被后续全局路径、位置和尺度纠偏后的 P4 实验取代，不能用于关闭当前 normalized other-only memory。
 
 ## 4. 边界 ROI
 
@@ -134,4 +136,3 @@ L_{primal}=L_{recon}+\alpha L_{completion}+\lambda(\bar C-C_{target})
 5. 中文、实体和代码内部错误显著下降；
 6. 真实 profiler FLOPs/时延与成本代理保持稳定相关；
 7. 至少三个种子后才决定是否扩大到 300M / 4096 bytes。
-

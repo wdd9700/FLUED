@@ -39,17 +39,19 @@ Current defensible claims:
 5. v3.4 implements parallel per-chunk memory, marginal coding-rate boundary
    selection, structured byte lookup, and hard readout emission with real
    backbone compaction.
-6. In the current 37M / 5K single-seed screen, the L2 marginal-rate variant is
-   the best observed balance between reconstruction, completion, and actual
-   latent count. This is a candidate, not a scaling claim.
+6. In a corrected 38M / 20K single-seed probe, normalized historical
+   other-chunk memory reaches `96.89%` reconstruction and `35.76` masked-byte
+   completion perplexity at `0.58` actual latent/byte. In the fixed-mask
+   threshold scan, it also outperforms no-memory at the matched `0.58-0.59`
+   latent/byte point. This is not a scaling claim.
 
 Non-claims:
 
 1. FLUED does not currently beat BPE as a production tokenizer replacement.
 2. FLUED does not currently beat BLT, H-Net, ByteFlow, Bolmo, or other recent
    tokenizer-free systems.
-3. The memory branch is not the default mainline until causal memory gains are
-   shown under strict paired-backbone tests.
+3. The current-memory/self-memory branch is not the default. The supported
+   v3.4 route reads only normalized summaries of other chunks.
 4. The historical v1 BPB signal should not be treated as reproduced under the
    current fair 2048-original-byte / 100K downstream protocol.
 
@@ -63,7 +65,7 @@ Non-claims:
 | v3.2 | Factorized byte seed, memory-free boundary, memory-conditioned interpreter, causal memory branch | The architecture boundary became clearer, but memory did not show universal gain. |
 | v3.2.1 | Strict masked-source codec and paired backbone evaluation | Masked-source training produced the strongest validated latent-interface result. |
 | v3.3 | Byte-to-latent decision interface | Current architecture target for public documentation and future implementation. |
-| v3.4 | Parallel memory, marginal coding rate, position/AR probes, hard emit control | The 5K matrix identifies viable components and exposes unresolved compute-control dynamics. |
+| v3.4 | Parallel memory, marginal coding rate, position/AR probes, hard emit control | Corrected 20K tests favor normalized no-self historical memory; current-memory helps early but plateaus lower. |
 
 See [docs/research/FLUED_RESEARCH_RETROSPECTIVE_CN.md](docs/research/FLUED_RESEARCH_RETROSPECTIVE_CN.md)
 for the full v1-v3.3 narrative; v3.4 evidence is indexed separately below.
@@ -172,20 +174,39 @@ Main principles:
    backbone; the fallback readout is always retained.
 5. The decoder reverses byte-to-readout translation and does not consume memory.
 
-See the [v3.4 implementation baseline](docs/versions/v3.4/FLUED_V3_4_IMPLEMENTATION_BASELINE_CN.md)
-and [5K ablation analysis](docs/versions/v3.4/FLUED_V3_4_5K_ABLATION_ANALYSIS_20260711_CN.md).
+See the [v3.4 implementation baseline](docs/versions/v3.4/FLUED_V3_4_IMPLEMENTATION_BASELINE_CN.md),
+[5K historical ablation](docs/versions/v3.4/FLUED_V3_4_5K_ABLATION_ANALYSIS_20260711_CN.md),
+and [current 20K memory/position analysis](docs/versions/v3.4/FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md).
 
 ### v3.4 5K Structural Screen
 
 | Variant | Reconstruction | Masked completion | Actual latent / byte | Reading |
 | --- | ---: | ---: | ---: | --- |
 | Exact marginal rate, full | 0.5970 | 0.1343 | 0.7852 | Stable boundaries, early suboptimal lock-in |
-| **L2 marginal rate** | **0.7041** | **0.1477** | **0.6804** | Current best balanced candidate |
+| **L2 marginal rate** | **0.7041** | **0.1477** | **0.6804** | Best candidate in this historical 5K screen |
 | Uniform boundaries | 0.9873 | 0.1485 | 0.9694 | Near-no-compression upper control |
 | Soft emit, no compaction | 0.6795 | 0.1334 | 1.0752 | Soft gates do not save backbone compute |
 
 All 17 raw logs and curve artifacts are published under
 [`results/v3.4/5k_ablation/`](results/v3.4/5k_ablation/README.md).
+
+### v3.4 Corrected 20K Memory Comparison
+
+All groups below were trained from scratch with the same 38.3M FLUED, 4.8M
+temporary backbone, seed, data, 512-byte context, 5% strict source masking, and
+20K learning-rate schedule.
+
+| Variant | Reconstruction | Masked completion | PPL | Actual latent / byte |
+| --- | ---: | ---: | ---: | ---: |
+| No memory | 0.8743 | 0.1164 | 45.05 | **0.4356** |
+| **Normalized other-only memory** | **0.9689** | **0.1380** | **35.76** | 0.5834 |
+| Other + detached current memory | 0.8544 | 0.1295 | 38.63 | 0.5288 |
+
+The 20K trajectory reverses the provisional 5K preference for a detached
+current-memory channel. Historical no-self memory becomes the best long-run
+route after a substantial 9K-12K representation reorganization. Raw logs and
+all 21 checkpoint-threshold evaluations are under
+[`results/v3.4/memory_position_20k_20260713/`](results/v3.4/memory_position_20k_20260713/README.md).
 
 ## Public Documentation Map
 
@@ -194,7 +215,8 @@ All 17 raw logs and curve artifacts are published under
 | [Documentation index](docs/README.md) | Versioned map and evidence status |
 | [Research retrospective](docs/research/FLUED_RESEARCH_RETROSPECTIVE_CN.md) | v1-v3.3 reasoning, failures, and iteration process |
 | [v3.4 implementation](docs/versions/v3.4/FLUED_V3_4_IMPLEMENTATION_BASELINE_CN.md) | Current executable architecture |
-| [v3.4 5K analysis](docs/versions/v3.4/FLUED_V3_4_5K_ABLATION_ANALYSIS_20260711_CN.md) | Current structural evidence and decisions |
+| [v3.4 5K analysis](docs/versions/v3.4/FLUED_V3_4_5K_ABLATION_ANALYSIS_20260711_CN.md) | Frozen short-run structural evidence |
+| [v3.4 20K memory/position analysis](docs/versions/v3.4/FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md) | Current canonical v3.4 decision and evidence |
 | [v3-family checkpoint audit](docs/research/evidence/v3-family/FLUED_V3_FULL_METRIC_TABLE_REEVALUATION_CN.md) | Strict historical checkpoint re-evaluation |
 | [v2 rebuild](docs/versions/v2/FLUED_REBUILD.md) | v2 semantic rebuild notes |
 
@@ -212,6 +234,7 @@ tools/train/v3_4/                      current v3.4 training entrypoint
 configs/v3_3/, configs/v3_4/           versioned experiment matrices
 docs/versions/                         version-frozen design and result records
 results/v3.4/5k_ablation/              public raw logs and curve artifacts
+results/v3.4/memory_position_20k_20260713/ corrected P3/P4 logs and threshold trajectories
 ```
 
 ## Quick Start
@@ -233,6 +256,19 @@ python tools/train/v3_4/train_v34_pos_ar_probe.py \
   --out-dir outputs/v34_smoke \
   --device cpu --max-steps 2
 ```
+
+Run the current 38M / 20K recommended v3.4 route:
+
+```bash
+python tools/train/v3_4/train_v34_pos_ar_probe.py \
+  --config configs/v3_4/v34_default_38m_20k.json \
+  --data-path /path/to/corpus.txt \
+  --out-dir outputs/v34_default_38m_20k
+```
+
+The direct configuration is intentionally explicit. Bare command-line defaults
+remain backward-compatible with historical checkpoints and are not the current
+recommended experiment.
 
 Run the v3.4 matrix on GPU:
 
@@ -272,12 +308,13 @@ python -m flued.e1_stage_a \
 1. v2 soft assignment still builds a full `[B, T, T]` matrix internally.
 2. Compression control is weak; target compression does not reliably control
    the final `m/n`.
-3. v3.4 evidence is still one seed, 5K steps, 512-byte sequences, and a 37M
+3. v3.4 evidence is still one seed, 20K steps, 512-byte sequences, and a 38M
    FLUED probe rather than the planned 300M / 4096-byte scale.
-4. L2 marginal rate is still plastic at 5K; semantic boundary quality is not yet
-   established by external labels or long-context downstream tasks.
-5. Memory improves reconstruction in this probe but has not shown a reliable
-   completion gain after accounting for added compute.
+4. L2 marginal rate and hard emit reorganize substantially between 9K and 12K;
+   semantic boundary quality is not established by long-context downstream tasks.
+5. Historical no-self memory improves the current paired probe, but the result
+   has not yet been confirmed across seeds, data domains, context lengths, or
+   larger backbones. Raw memory norms also continue to grow before normalization.
 6. The current public claim is a traceable research process and executable
    architecture, not benchmark dominance.
 
