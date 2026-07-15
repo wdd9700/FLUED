@@ -1,4 +1,4 @@
-# FLUED: FLexible Unified Encoder-Decoder
+# FLUED: Fluid Language Unified Encoder-Decoder
 
 **FLUED** is an Alethic Insight research project on tokenizer-free language interfaces.
 
