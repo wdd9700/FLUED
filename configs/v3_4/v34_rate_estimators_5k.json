@@ -1,0 +1,18 @@
+{
+  "matrix_name": "v34_rate_estimators_5k",
+  "base_file": "configs/v3_4/v34_default_38m_20k.json",
+  "base": {
+    "data_path": "E:\\projects\\SoulMamba\\soulvlm_project\\temp\\corpus_v3.txt",
+    "max_steps": 5000,
+    "max_eval_batches": 32,
+    "boundary_curriculum_switch_step": 3000,
+    "boundary_curriculum_transition_steps": 500,
+    "checkpoint_every": 1000,
+    "milestone_every": 1000
+  },
+  "experiments": [
+    {"id": "r0_diag_marginal", "overrides": {"boundary_curriculum_coding_rate_mode": "diag"}},
+    {"id": "r1_exact_marginal", "overrides": {"boundary_curriculum_coding_rate_mode": "exact"}},
+    {"id": "r2_l2_energy_control", "overrides": {"boundary_curriculum_coding_rate_mode": "l2"}}
+  ]
+}

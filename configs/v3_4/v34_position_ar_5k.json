@@ -1,0 +1,34 @@
+{
+  "matrix_name": "v34_position_ar_5k",
+  "base_file": "configs/v3_4/v34_default_38m_20k.json",
+  "base": {
+    "data_path": "E:\\projects\\SoulMamba\\soulvlm_project\\temp\\corpus_v3.txt",
+    "max_steps": 5000,
+    "max_eval_batches": 32,
+    "boundary_curriculum_switch_step": 3000,
+    "boundary_curriculum_transition_steps": 500,
+    "checkpoint_every": 1000,
+    "milestone_every": 1000
+  },
+  "experiments": [
+    {"id": "o0_position_ar", "overrides": {}},
+    {"id": "o1_position_no_ar", "overrides": {"use_ar": false}},
+    {
+      "id": "o2_no_position_ar",
+      "overrides": {
+        "use_position": false,
+        "position_strategy": "none",
+        "use_prompt_alibi": false
+      }
+    },
+    {
+      "id": "o3_no_position_no_ar",
+      "overrides": {
+        "use_position": false,
+        "position_strategy": "none",
+        "use_prompt_alibi": false,
+        "use_ar": false
+      }
+    }
+  ]
+}

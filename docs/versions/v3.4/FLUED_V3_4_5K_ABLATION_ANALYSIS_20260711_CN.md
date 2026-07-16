@@ -1,5 +1,7 @@
 # FLUED v3.4 统一 5K 消融与曲线分析
 
+> **历史筛选口径：** 该矩阵早于 2026-07-12 的全局路径纠偏，适合筛选候选组件，不适合作为当前架构的最终定量消融。`L2 coding rate` 在当前实现中应读作逐位置 L2 能量代理，chunk 数仍固定。
+
 > 历史短程筛选：后续全局路径纠偏、memory 归一化和 20K 配对实验改变了部分默认判断。当前结论见 [`FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md`](FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md)。
 
 ## 1. 实验口径

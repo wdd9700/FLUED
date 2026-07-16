@@ -1,5 +1,7 @@
 # FLUED v3.4 渐进课程、Memory 20K 与边界 ROI 审计
 
+> **历史中间结论：** 本文的 memory 正负判断随后被 P0-P4 从零训练部分反转；2026-07-14 同检查点干预又表明其即时内容收益很小。本文主要保留决策过程，不能单独确定 memory 默认地位。
+
 > 历史反例：本文发生在全局 interpreter 路径和 memory 尺度纠偏之前。其负结果用于解释为什么必须重做路径审计，不代表当前 no-self normalized memory。当前结论见 [`FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md`](FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md)。
 
 ## 1. 实验范围

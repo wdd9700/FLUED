@@ -1,5 +1,13 @@
 # FLUED v3.4 实现基线与位置/小自回归实验
 
+> **2026-07-15 实证状态更新：** 本文以下主体描述的是实验前实现基线，不再代表当前推荐组合。
+> 硬盘迁移后的修正版实验已确认普通 byte lookup 优于当前 16x16 lookup、硬 emit 优于软 emit、
+> other-only memory 没有改善同预算前沿；共享非严格反向 decoder 在 20K 同预算下显著落后
+> 独立 decoder。最新数据、归档和决策见
+> [`FLUED_V3_4_POST_MIGRATION_EXPERIMENTS_20260715_CN.md`](FLUED_V3_4_POST_MIGRATION_EXPERIMENTS_20260715_CN.md)。
+
+> **2026-07-14 审计修正：** 本文记录设计基线，不等于当前全部实现。默认 P4 路径在 3K 后由固定数量的编码分数 Top-K 执行边界，`tau_cut=0.90` 只在 `threshold` 模式生效；当前 `l2` 是逐位置投影能量代理；所谓单步扩散只是高斯噪声正则；decoder 是共享 byte lookup 的独立跨度解码骨架，并非 tied-inverse。以同目录全量自查报告为准。
+
 ## 1. 本轮目的
 
 v3.4 不再延续 v3.3 的串行历史记忆队列。它首先把每个 chunk 的局部 memory 并行生成，再由 interpreter 在一次并行前向中读取除当前 chunk 之外的 memory。当前实验只回答一个问题：**显式位置编码与小型自回归修正头，哪一种更有效地补足 chunk 内字节顺序信息。**
@@ -27,7 +35,7 @@ flowchart TD
 必须保持：
 
 1. segmentor 是并行 DiT 风格上下文模型，不是逐字节 MLP。
-2. `tau_cut=0.90` 固定用于执行切分；`tau_trans=0.75` 固定保留为诊断阈值，不再驱动 interpreter 的逻辑转折先验。
+2. `threshold` 模式中 `tau_cut=0.90` 用于执行切分；默认 P4 的 uniform/Top-K 路径不由该阈值执行。`tau_trans=0.75` 当前只保留为诊断阈值。
 3. 前向采用硬切分；反向通过连续置信度的软分配桥更新 segmentor。
 4. UTF-8 continuation byte 永远禁止切分，其置信度先验目标为 `-1`。
 5. 标点和空白是弱先验，置信度目标为 `0.5`；其余字符级候选边界只约束均值接近 `0`。
@@ -38,7 +46,7 @@ flowchart TD
 10. decoder 只执行 readout 到 byte 的逆翻译，不直接读取 memory。
 11. 严格补全任务必须先在原始 byte 输入上 mask，FLUED 不得接触 clean 输入。
 12. memory 内容暂不加直接标签；固定使用率区间损失已退役，memory 由重建和严格补全主任务塑形。
-13. 历史探针曾错误地最大化全局 readout 分散度；该损失已废止。当前采用 byte 位置的前缀边际编码率，并在固定/长度分桶 chunk 预算内 Top-K 选边界。
+13. 历史探针曾错误地最大化全局 readout 分散度；该损失已废止。`exact` 模式采用前缀 log-det 增量；当前默认 `l2` 模式只是逐 byte 位置的投影能量代理，并在固定 chunk 数预算内 Top-K 选边界。
 14. `128 byte/chunk` 是无损硬兜底；超出 chunk 容量的请求切分在执行前被裁掉，但连续置信度和请求切分率仍保留用于训练与诊断，禁止通过截断文本处理溢出。
 15. 每个 chunk 产生 1 个必开的 fallback readout 和最多 15 个 extra readout；emit controller 使用硬前向、连续直通反传。
 16. emit 的思想借鉴 Qwen gated attention 的“低价值输出沉默”，但 Qwen 原机制不删除 token；FLUED emit 是新的计算门控设计。
@@ -124,8 +132,10 @@ extra value
 - 回归测试：`tests/test_v34_architecture.py`
 - 当前 P4 配置的 FLUED 为 38,312,983 参数，临时 backbone 为 4,783,232 参数，总计 43,096,215。
 - 这是约 1/10 规模的结构筛选，不是 v3.4 最终 300M-400M 训练结论。
-- 当前推荐直接配置：`configs/v3_4/v34_default_38m_20k.json`。裸命令行默认值为兼容旧 checkpoint 保留，不代表当前推荐架构。
+- `configs/v3_4/v34_default_38m_20k.json` 是历史实现基线，不再是 2026-07-15 的无条件推荐配置。
+- 当前消融选择覆盖记录在 `configs/v3_4/v34_selected_after_lookup_20260715.json`；但 decoder
+  尚未闭环，因此当前不存在可直接宣称为最终 v3.4 的单一默认配置。
 
 ## 7. 组件消融
 
-历史 5K 矩阵逐项关闭跨 chunk memory、软边界反传桥、边界专用先验、编码率、backbone 补全、单步扩散噪声和结构化字节表。logic-transition 与固定 memory 使用率已从当前实现基线退役。位置和 memory 的当前默认值由 2026-07-13 的 P0-P4 严格串行实验确定：segmentor 在 RoPE 上叠加提示级双向 ALiBi，P0 测量的是 ALiBi 的增量而非纯替代；chunk 内保留 RoPE；other-memory 使用 chunk-index RoPE，经无仿射 LayerNorm 后以固定 `0.10` 残差进入 interpreter；当前 chunk memory 默认关闭。
+历史 5K 矩阵逐项关闭跨 chunk memory、软边界反传桥、边界专用先验、编码率、backbone 补全、单步扩散噪声和结构化字节表。logic-transition 与固定 memory 使用率已从实现基线退役。2026-07-13 的 P0-P4 曾选择 RoPE + 提示级双向 ALiBi、无 memory 位置编码、无仿射 LayerNorm 和 `0.10` other-memory 残差；迁移后的修正版实验没有复现 memory 的同预算优势，因此这些设置只保留为历史候选，不再构成当前默认组合。

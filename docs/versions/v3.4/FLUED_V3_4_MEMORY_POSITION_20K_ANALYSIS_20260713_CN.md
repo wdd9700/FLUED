@@ -1,6 +1,11 @@
 # FLUED v3.4 位置与 Memory 严格串行实验：5K 筛选和 20K 确认
 
-> 本文是 2026-07-13 完成的当前规范结论。早期 1K/5K 文档继续保留为研究过程，但涉及 memory 默认路径、位置编码和注入尺度时，以本文为准。
+> **历史配对实验：** 本文是 2026-07-13 当时的规范结论。修正版代码在硬盘迁移后重新完成
+> 5K/20K 配对，memory、位置、lookup、emit 和 decoder 的当前判断以
+> [`FLUED_V3_4_POST_MIGRATION_EXPERIMENTS_20260715_CN.md`](FLUED_V3_4_POST_MIGRATION_EXPERIMENTS_20260715_CN.md)
+> 为准。本文继续用于追溯旧实现为何曾得到 memory-positive 结论。
+>
+> **2026-07-14 审计补充：** P4 的实际 `resolved_config.json` 为 `memory_use_position=false`，因此 P1 的 chunk-index RoPE 胜者没有进入 P4；P3 又同时包含 other-memory 与 detached current-memory。本文能证明 P4 三条完整训练路径的端点差异，不能单独证明 memory 位置或 `LayerNorm+0.10` 对 other-only 的独立贡献。decoder 也是独立跨度解码骨架，不是 tied-inverse。详见同目录全量自查报告。
 
 ## 1. 为什么重做
 
@@ -117,7 +122,7 @@ flowchart TD
     C --> D["Hard chunk forward / soft-confidence backward"]
     D --> E["Chunk-local byte states + local RoPE"]
     E --> M["Parallel per-chunk memory summaries"]
-    M --> P["Other-chunk memory with chunk-index RoPE"]
+    M --> P["Other-chunk memory；P4 实际未启用 memory 位置编码"]
     P --> N["Affine-free LayerNorm + fixed 0.10 residual"]
     E --> I["One-shot chunk-local interpreter"]
     N --> I
@@ -125,7 +130,7 @@ flowchart TD
     R --> G["Hard emit and real backbone compaction"]
     G --> H["External latent backbone"]
     H --> Z["Completed readout sequence"]
-    Z --> X["Memory-free tied decoder"]
+    Z --> X["Memory-free independent span decoder；共享 byte lookup 输出表"]
     X --> Y["Byte distribution"]
 ```
 

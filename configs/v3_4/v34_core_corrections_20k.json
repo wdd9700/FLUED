@@ -1,0 +1,14 @@
+{
+  "matrix_name": "v34_core_corrections_20k",
+  "base_config": "configs/v3_4/v34_core_corrections_5k.json",
+  "decision_rule": "Only launch after the 5K matrix passes gradient, zero-truncation, and learning-curve gates.",
+  "candidates": [
+    "a_legacy_p4_reference",
+    "d_corrected_full",
+    "g_corrected_no_memory"
+  ],
+  "max_steps": 20000,
+  "checkpoint_every": 1000,
+  "milestone_every": 3000,
+  "seeds_after_single_seed_gate": [42, 123, 999]
+}

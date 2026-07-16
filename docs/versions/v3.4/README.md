@@ -1,20 +1,39 @@
 # FLUED v3.4
 
-当前主线：并行逐 chunk memory、边际编码率边界、结构化 byte lookup、RoPE + 小 AR 修正和硬 readout emit。
+当前实证状态：固定置信度阈值边界、readout 级补全、RoPE/ALiBi + 小 AR、普通 byte lookup
+和硬 readout emit 已获得修正版实验支持。2026-07-16 长程归因进一步表明：hard emit 在动态边界
+接管前已造成容量坍缩，边界接管随后带来第二次梯度冲击；单纯延长到 40K 或缩短过渡无法恢复。
+memory 使用率权重 0.05 在当前单种子小模型上首次改善率失真前沿，但其 gate 强度不等于真实
+内容依赖，仍需多种子和长上下文确认。共享近似逆 decoder 的首要问题仍是联合训练非平稳。
+
+> **最新两组归因矩阵：** [`FLUED_V3_4_ATTRIBUTION_MATRICES_RESULTS_20260716_CN.md`](FLUED_V3_4_ATTRIBUTION_MATRICES_RESULTS_20260716_CN.md)。该文包含 2×40K 边界课程、3×20K memory 使用率、严格 no-memory 对照、修复后的 memory 干预与下一步架构决策。
+
+> **硬盘迁移后实验总报告：** [`FLUED_V3_4_POST_MIGRATION_EXPERIMENTS_20260715_CN.md`](FLUED_V3_4_POST_MIGRATION_EXPERIMENTS_20260715_CN.md)。该文汇总 2026-07-15 完成的边界闭环、核心路径、位置/小 AR、编码率、lookup/emit、memory 与 decoder 长程实验，是当前结论的最高优先级入口。
+
+> **先读自查报告：** [`FLUED_V3_4_FULL_SELF_AUDIT_20260714_CN.md`](FLUED_V3_4_FULL_SELF_AUDIT_20260714_CN.md)。它区分当前代码事实、历史实验观察和仍未落地的设计，不再把逐位置 L2 能量代理、单次噪声训练或独立 decoder 骨架表述成完整边际编码率、扩散模型和 tied-inverse decoder。
+>
+> **自查后的正式修正：** [`FLUED_V3_4_CORE_CORRECTION_AND_RERUN_20260714_CN.md`](FLUED_V3_4_CORE_CORRECTION_AND_RERUN_20260714_CN.md)。one-shot 路线保留；默认改为置信度阈值切分、对角边际编码率训练信号、readout 级补全和共享 interpreter 权重的近似逆 decoder。
 
 建议阅读顺序：
 
-1. [`FLUED_V3_4_IMPLEMENTATION_BASELINE_CN.md`](FLUED_V3_4_IMPLEMENTATION_BASELINE_CN.md)
-2. [`FLUED_V3_4_RATE_EMIT_CORRECTION_20260710_CN.md`](FLUED_V3_4_RATE_EMIT_CORRECTION_20260710_CN.md)
-3. [`FLUED_V3_4_5K_ABLATION_ANALYSIS_20260711_CN.md`](FLUED_V3_4_5K_ABLATION_ANALYSIS_20260711_CN.md)
-4. [`FLUED_V3_4_20K_RATE_CURRICULUM_ANALYSIS_20260711_CN.md`](FLUED_V3_4_20K_RATE_CURRICULUM_ANALYSIS_20260711_CN.md)
-5. [`../../../results/v3.4/20k_rate_comparison/`](../../../results/v3.4/20k_rate_comparison/)
-6. [`FLUED_V3_4_PROGRESSIVE_MEMORY_ROI_20260712_CN.md`](FLUED_V3_4_PROGRESSIVE_MEMORY_ROI_20260712_CN.md)
-7. [`FLUED_V3_4_BOUNDARY_ROI_PROTOCOL_CN.md`](FLUED_V3_4_BOUNDARY_ROI_PROTOCOL_CN.md)
-8. [`../../../results/v3.4/progressive_memory_20k/`](../../../results/v3.4/progressive_memory_20k/)
-9. [`FLUED_V3_4_GLOBAL_PATH_CORRECTION_AND_RERUN_20260712_CN.md`](FLUED_V3_4_GLOBAL_PATH_CORRECTION_AND_RERUN_20260712_CN.md)
-10. [历史位置/memory 纠偏结果](../../../results/v3.4/position_memory_rerun_20260712/)
-11. [`FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md`](FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md)
-12. [`../../../results/v3.4/memory_position_20k_20260713/`](../../../results/v3.4/memory_position_20k_20260713/)
+1. [`FLUED_V3_4_ATTRIBUTION_MATRICES_RESULTS_20260716_CN.md`](FLUED_V3_4_ATTRIBUTION_MATRICES_RESULTS_20260716_CN.md)
+2. [`FLUED_V3_4_POST_MIGRATION_EXPERIMENTS_20260715_CN.md`](FLUED_V3_4_POST_MIGRATION_EXPERIMENTS_20260715_CN.md)
+3. [`FLUED_V3_4_ATTRIBUTION_PLAN_20260715_CN.md`](FLUED_V3_4_ATTRIBUTION_PLAN_20260715_CN.md)
+4. [`FLUED_V3_4_MINIMAL_ATTRIBUTION_RESULTS_20260715_CN.md`](FLUED_V3_4_MINIMAL_ATTRIBUTION_RESULTS_20260715_CN.md)
+4. [`FLUED_V3_4_RERUN_MATRIX_20260714_CN.md`](FLUED_V3_4_RERUN_MATRIX_20260714_CN.md)
+5. [`FLUED_V3_4_FULL_SELF_AUDIT_20260714_CN.md`](FLUED_V3_4_FULL_SELF_AUDIT_20260714_CN.md)
+6. [`FLUED_V3_4_CORE_CORRECTION_AND_RERUN_20260714_CN.md`](FLUED_V3_4_CORE_CORRECTION_AND_RERUN_20260714_CN.md)
+7. [`FLUED_V3_4_IMPLEMENTATION_BASELINE_CN.md`](FLUED_V3_4_IMPLEMENTATION_BASELINE_CN.md)
+8. [`FLUED_V3_4_RATE_EMIT_CORRECTION_20260710_CN.md`](FLUED_V3_4_RATE_EMIT_CORRECTION_20260710_CN.md)
+9. [`FLUED_V3_4_5K_ABLATION_ANALYSIS_20260711_CN.md`](FLUED_V3_4_5K_ABLATION_ANALYSIS_20260711_CN.md)
+10. [`FLUED_V3_4_20K_RATE_CURRICULUM_ANALYSIS_20260711_CN.md`](FLUED_V3_4_20K_RATE_CURRICULUM_ANALYSIS_20260711_CN.md)
+11. [`../../../results/v3.4/20k_rate_comparison/`](../../../results/v3.4/20k_rate_comparison/)
+12. [`FLUED_V3_4_PROGRESSIVE_MEMORY_ROI_20260712_CN.md`](FLUED_V3_4_PROGRESSIVE_MEMORY_ROI_20260712_CN.md)
+13. [`FLUED_V3_4_BOUNDARY_ROI_PROTOCOL_CN.md`](FLUED_V3_4_BOUNDARY_ROI_PROTOCOL_CN.md)
+14. [`../../../results/v3.4/progressive_memory_20k/`](../../../results/v3.4/progressive_memory_20k/)
+15. [`FLUED_V3_4_GLOBAL_PATH_CORRECTION_AND_RERUN_20260712_CN.md`](FLUED_V3_4_GLOBAL_PATH_CORRECTION_AND_RERUN_20260712_CN.md)
+16. [历史位置/memory 纠偏结果](../../../results/v3.4/position_memory_rerun_20260712/)
+17. [`FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md`](FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md)
+18. [`../../../results/v3.4/memory_position_20k_20260713/`](../../../results/v3.4/memory_position_20k_20260713/)
 
-`FLUED_V3_4_ABLATION_RESULTS_20260710_CN.md` 是早期 1K pilot，5K 文档是短程结构筛选；涉及位置和 memory 默认路径时，以 2026-07-13 的 20K 分析为准。
+`FLUED_V3_4_ABLATION_RESULTS_20260710_CN.md` 是早期 1K pilot，7 月 10--13 日文档是历史筛选；涉及位置、lookup、emit、memory、decoder 和编码率默认路径时，以 2026-07-15 硬盘迁移后实验总报告为准。

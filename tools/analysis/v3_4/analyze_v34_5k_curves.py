@@ -231,7 +231,12 @@ def main() -> None:
     max_final_step = max((int(summary.get("steps", 0)) for _, _, summary in loaded), default=5000)
     snapshots = DEFAULT_SNAPSHOTS
     if max_final_step > 5000:
-        snapshots = tuple(step for step in (500, 1000, 2500, 5000, 10000, 15000, 20000) if step <= max_final_step)
+        snapshots = tuple(
+            step
+            for step in (500, 1000, 2500, 5000, 10000, 15000, 20000, 30000, 40000)
+            if step <= max_final_step
+        )
+    GROUPS["matrix"] = list(all_rows)
     summaries = [summarize_run(name, rows, summary, snapshots) for name, rows, summary in loaded]
     (out_dir / "curve_summary.json").write_text(json.dumps(summaries, ensure_ascii=False, indent=2), encoding="utf-8")
     write_table(summaries, out_dir, snapshots)

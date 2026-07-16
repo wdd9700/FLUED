@@ -41,11 +41,12 @@ from tools.train.v3_3.train_v33 import (  # noqa: E402
     make_byte_mask,
     make_dataloaders,
     make_targets,
+    masked_readouts_from_slots,
 )
 
 
 def build_model(args: argparse.Namespace) -> FLUEDV34:
-    return FLUEDV34(
+    model = FLUEDV34(
         FLUEDV34Config(
             d_model=args.d_model,
             nhead=args.nhead,
@@ -90,9 +91,16 @@ def build_model(args: argparse.Namespace) -> FLUEDV34:
             tau_cut=args.tau_cut,
             tau_trans=args.tau_trans,
             boundary_temperature=args.boundary_temperature,
+            boundary_bridge_gradient_scale=getattr(args, "boundary_bridge_gradient_scale", 1.0),
             noise_scale=args.noise_scale,
+            decoder_mode=getattr(args, "decoder_mode", "legacy_independent"),
         )
     )
+    # The rate dual is training-only state saved outside the model state dict.
+    # Register a non-persistent default so evaluation-only construction follows
+    # the same code path without requiring the training loop to attach it.
+    model.register_buffer("boundary_rate_dual", torch.zeros(()), persistent=False)
+    return model
 
 
 def apply_boundary_curriculum(model: FLUEDV34, args: argparse.Namespace, step: int) -> bool:
@@ -107,7 +115,11 @@ def apply_boundary_curriculum(model: FLUEDV34, args: argparse.Namespace, step: i
     if transition_steps > 0 and step < switch_step + transition_steps:
         progress = (step - switch_step) / float(transition_steps)
         alpha = 0.5 - 0.5 * math.cos(math.pi * progress)
-        active_mode = "uniform_l2_blend"
+        active_mode = (
+            "uniform_confidence_blend"
+            if target_mode == "confidence_threshold"
+            else "uniform_l2_blend"
+        )
     else:
         alpha = 1.0
         active_mode = target_mode
@@ -168,7 +180,7 @@ def _run_completion(
     predicted_flat = _scatter_compact_readout(predicted_compact, compact_pos, flat_z.size(1))
     predicted = predicted_flat.reshape_as(readout)
     completed = torch.where((affected_readouts & active_readouts).unsqueeze(-1), predicted, readout)
-    logits = model.decoder(completed, chunk_mask)
+    logits = model.decode(completed, chunk_mask, active_readouts)
     return logits, compact_z.size(1)
 
 
@@ -218,7 +230,12 @@ def boundary_prior_losses_v34(
             "boundary_continue_target": -1.0,
             "boundary_punct_target": 0.5,
         }
-    return loss, stats
+    components = {
+        "continuation": cont_loss,
+        "punctuation": weak_loss,
+        "neutral_mean": neutral_mean.square(),
+    }
+    return loss, stats, components
 
 
 def projected_coding_rate_loss(
@@ -244,6 +261,215 @@ def projected_coding_rate_loss(
     sign, logabsdet = torch.linalg.slogdet(eye + covariance)
     rate = torch.where(sign > 0, logabsdet / dim, logabsdet.new_zeros(()))
     return -rate.to(readout.dtype), rate.detach().to(readout.dtype)
+
+
+def boundary_rate_alignment_loss(
+    confidence: torch.Tensor,
+    marginal_rate: torch.Tensor,
+    token_ids: torch.Tensor,
+    valid: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Align signed confidence with a detached, sample-normalized rate target."""
+    raw = (token_ids - 1).clamp(min=0, max=255)
+    continuation = raw.ge(0x80) & raw.le(0xBF) & valid
+    eligible = valid & ~continuation
+    if eligible.size(1):
+        eligible = eligible.clone()
+        eligible[:, 0] = False
+    weight = eligible.to(marginal_rate.dtype)
+    count = weight.sum(dim=1, keepdim=True).clamp(min=1.0)
+    mean = (marginal_rate * weight).sum(dim=1, keepdim=True) / count
+    variance = ((marginal_rate - mean).square() * weight).sum(dim=1, keepdim=True) / count
+    target = torch.tanh((marginal_rate - mean) / variance.sqrt().clamp(min=1.0e-5)).detach()
+    if not eligible.any():
+        zero = confidence.new_zeros(())
+        return zero, zero, zero, zero, zero
+    loss = F.smooth_l1_loss(confidence[eligible], target[eligible])
+    centered_conf = confidence[eligible].float() - confidence[eligible].float().mean()
+    centered_target = target[eligible].float() - target[eligible].float().mean()
+    correlation = (
+        (centered_conf * centered_target).mean()
+        / (centered_conf.square().mean().sqrt() * centered_target.square().mean().sqrt()).clamp(min=1.0e-6)
+    )
+    target_cut_fraction = target[eligible].gt(0.9).float().mean()
+    return loss, target[eligible].float().mean(), correlation, target_cut_fraction, target
+
+
+def boundary_threshold_calibration_loss(
+    confidence: torch.Tensor,
+    target: torch.Tensor,
+    token_ids: torch.Tensor,
+    valid: torch.Tensor,
+    tau_cut: float,
+    temperature: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Calibrate threshold-crossing probability without discrete pseudo-labels."""
+    if temperature <= 0:
+        raise ValueError("boundary calibration temperature must be positive")
+    raw = (token_ids - 1).clamp(min=0, max=255)
+    continuation = raw.ge(0x80) & raw.le(0xBF) & valid
+    eligible = valid & ~continuation
+    if eligible.size(1):
+        eligible = eligible.clone()
+        eligible[:, 0] = False
+    if not eligible.any():
+        zero = confidence.new_zeros(())
+        return zero, zero
+    target_probability = torch.sigmoid(
+        (target[eligible].float() - float(tau_cut)) / float(temperature)
+    ).detach()
+    prediction_logits = (
+        confidence[eligible].float() - float(tau_cut)
+    ) / float(temperature)
+    loss = F.binary_cross_entropy_with_logits(prediction_logits, target_probability)
+    prediction_probability = torch.sigmoid(prediction_logits)
+    probability_gap = (prediction_probability - target_probability).abs().mean()
+    return loss, probability_gap
+
+
+def boundary_threshold_density_loss(
+    confidence: torch.Tensor,
+    target: torch.Tensor,
+    token_ids: torch.Tensor,
+    valid: torch.Tensor,
+    tau_cut: float,
+    temperature: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Match the dynamic coding-rate cut count with hard-forward/soft-backward gradients."""
+    if temperature <= 0:
+        raise ValueError("boundary density temperature must be positive")
+    raw = (token_ids - 1).clamp(min=0, max=255)
+    continuation = raw.ge(0x80) & raw.le(0xBF) & valid
+    eligible = valid & ~continuation
+    if eligible.size(1):
+        eligible = eligible.clone()
+        eligible[:, 0] = False
+    eligible_f = eligible.float()
+    denominator = eligible_f.sum().clamp(min=1.0)
+
+    soft_cut = torch.sigmoid((confidence.float() - float(tau_cut)) / float(temperature))
+    hard_cut = confidence.gt(float(tau_cut)).float()
+    priced_cut = soft_cut + (hard_cut - soft_cut).detach()
+    target_cut = target.detach().gt(float(tau_cut)).float()
+    predicted_density = (priced_cut * eligible_f).sum() / denominator
+    target_density = (target_cut * eligible_f).sum() / denominator
+    if not eligible.any():
+        zero = confidence.new_zeros(())
+        return zero, zero
+    density_gap = predicted_density - target_density
+    loss = F.smooth_l1_loss(
+        predicted_density,
+        target_density,
+        beta=0.01,
+    )
+    return loss, density_gap.abs().detach()
+
+
+def boundary_threshold_positive_margin_loss(
+    confidence: torch.Tensor,
+    target: torch.Tensor,
+    token_ids: torch.Tensor,
+    valid: torch.Tensor,
+    tau_cut: float,
+    margin: float,
+    temperature: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Push coding-rate-positive positions across the fixed execution threshold."""
+    if temperature <= 0:
+        raise ValueError("boundary margin temperature must be positive")
+    if margin < 0:
+        raise ValueError("boundary positive margin must be non-negative")
+    raw = (token_ids - 1).clamp(min=0, max=255)
+    continuation = raw.ge(0x80) & raw.le(0xBF) & valid
+    eligible = valid & ~continuation
+    if eligible.size(1):
+        eligible = eligible.clone()
+        eligible[:, 0] = False
+    positive = eligible & target.detach().gt(float(tau_cut))
+    if not positive.any():
+        zero = confidence.new_zeros(())
+        return zero, zero
+    required = float(tau_cut) + float(margin)
+    shortfall = required - confidence.float()[positive]
+    loss = float(temperature) * F.softplus(shortfall / float(temperature)).mean()
+    return loss, F.relu(shortfall).mean().detach()
+
+
+def boundary_rate_minimum_ratio_loss(
+    confidence: torch.Tensor,
+    target: torch.Tensor,
+    token_ids: torch.Tensor,
+    valid: torch.Tensor,
+    tau_cut: float,
+    temperature: float,
+    minimum_ratio: float,
+    dual_value: torch.Tensor,
+    augmented_weight: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Enforce a batch-average lower cut ratio with hard-forward/soft-backward counts."""
+    if not 0.0 < minimum_ratio <= 1.0:
+        raise ValueError("boundary minimum rate ratio must be in (0, 1]")
+    raw = (token_ids - 1).clamp(min=0, max=255)
+    continuation = raw.ge(0x80) & raw.le(0xBF) & valid
+    eligible = valid & ~continuation
+    if eligible.size(1):
+        eligible = eligible.clone()
+        eligible[:, 0] = False
+    eligible_f = eligible.float()
+    denominator = eligible_f.sum().clamp(min=1.0)
+    soft_cut = torch.sigmoid((confidence.float() - float(tau_cut)) / float(temperature))
+    hard_cut = confidence.gt(float(tau_cut)).float()
+    priced_cut = soft_cut + (hard_cut - soft_cut).detach()
+    target_cut = target.detach().gt(float(tau_cut)).float()
+    predicted_density = (priced_cut * eligible_f).sum() / denominator
+    target_density = ((target_cut * eligible_f).sum() / denominator).detach()
+    constraint = float(minimum_ratio) * target_density - predicted_density
+    violation = F.relu(constraint)
+    loss = dual_value.detach() * violation + 0.5 * float(augmented_weight) * violation.square()
+    return loss, constraint, predicted_density.detach(), target_density
+
+
+def boundary_compute_budget_loss(
+    confidence: torch.Tensor,
+    valid: torch.Tensor,
+    force_continue: torch.Tensor,
+    tau_cut: float,
+    temperature: float,
+    bytes_per_chunk: int,
+    dual_value: torch.Tensor,
+    augmented_weight: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Price batch-average soft chunk creation without fixing per-sample K."""
+    if bytes_per_chunk <= 0:
+        raise ValueError("boundary target bytes_per_chunk must be positive")
+    eligible = valid & ~force_continue
+    soft_cut = torch.sigmoid((confidence.float() - float(tau_cut)) / float(temperature))
+    soft_cut = soft_cut * eligible.float()
+    hard_cut = confidence.gt(float(tau_cut)).float() * eligible.float()
+    if soft_cut.size(1):
+        soft_cut = soft_cut.clone()
+        hard_cut = hard_cut.clone()
+        soft_cut[:, 0] = 0.0
+        hard_cut[:, 0] = 0.0
+    # The cost ledger must see exactly the hard execution count in forward,
+    # while the segmentor still receives the continuous sigmoid derivative.
+    priced_cut = soft_cut + (hard_cut - soft_cut).detach()
+    valid_bytes = valid.float().sum(dim=1).clamp(min=1.0)
+    priced_chunks = 1.0 + priced_cut.sum(dim=1)
+    target_chunks = torch.maximum(
+        valid_bytes / float(bytes_per_chunk),
+        torch.ones_like(valid_bytes),
+    )
+    priced_density = (priced_chunks / valid_bytes).mean()
+    soft_density = ((1.0 + soft_cut.sum(dim=1)) / valid_bytes).mean().detach()
+    target_density = (target_chunks / valid_bytes).mean().detach()
+    constraint = priced_density - target_density
+    positive_violation = F.relu(constraint)
+    # This is an upper compute bound, not a target rate. Once a batch is below
+    # budget, the controller must stop pushing toward fewer chunks; task and
+    # structural signals remain free to choose any cheaper segmentation.
+    loss = dual_value.detach() * positive_violation + 0.5 * float(augmented_weight) * positive_violation.square()
+    return loss, constraint, priced_density, target_density, soft_density
 
 
 def step_model(
@@ -275,8 +501,18 @@ def step_model(
     identity_loss = _mean_masked(identity_ce, slot_mask)
 
     affected_chunks = masked_slot.any(dim=-1) & out.chunks.chunk_mask
-    affected_readouts = affected_chunks.unsqueeze(-1).expand(-1, -1, out.readout_z.size(2))
+    if args.completion_mask_granularity == "readout":
+        affected_readouts = masked_readouts_from_slots(
+            masked_slot,
+            out.chunks.chunk_mask,
+            out.readout_z.size(2),
+        )
+    else:
+        affected_readouts = affected_chunks.unsqueeze(-1).expand(-1, -1, out.readout_z.size(2))
     active_readouts = out.emit_hard if args.use_emit_controller else out.chunks.chunk_mask.unsqueeze(-1).expand_as(affected_readouts)
+    # A masked byte must retain a writable latent slot even when the emit
+    # controller would otherwise silence that optional readout.
+    active_readouts = active_readouts | affected_readouts
     completed_logits, backbone_padded_units = _run_completion(
         model,
         backbone,
@@ -290,12 +526,106 @@ def step_model(
     preserve_slot = slot_mask & affected_chunks.unsqueeze(-1) & ~masked_slot
     preserve_loss = _mean_masked(completion_ce, preserve_slot)
 
-    boundary_loss, boundary_stats = boundary_prior_losses_v34(
+    boundary_loss, boundary_stats, boundary_components = boundary_prior_losses_v34(
         out.segmentor.confidence,
-        src,
+        clean,
         valid,
         collect_metrics=collect_metrics,
     )
+    if args.boundary_mode in {"confidence_threshold", "uniform_confidence_blend"}:
+        boundary_rate_loss, boundary_rate_target_mean, confidence_rate_correlation, boundary_rate_target_cut_fraction, boundary_rate_target = (
+            boundary_rate_alignment_loss(
+                out.segmentor.confidence,
+                out.aux["marginal_coding_rate"],
+                clean,
+                valid,
+            )
+        )
+    else:
+        boundary_rate_loss = out.readout_z.new_zeros(())
+        boundary_rate_target_mean = out.readout_z.new_zeros(())
+        confidence_rate_correlation = out.readout_z.new_zeros(())
+        boundary_rate_target_cut_fraction = out.readout_z.new_zeros(())
+        boundary_rate_target = out.segmentor.confidence.detach().new_zeros(
+            out.segmentor.confidence.shape
+        )
+    if args.boundary_mode in {"confidence_threshold", "uniform_confidence_blend"}:
+        boundary_calibration_loss, boundary_calibration_probability_gap = (
+            boundary_threshold_calibration_loss(
+                out.segmentor.confidence,
+                boundary_rate_target,
+                clean,
+                valid,
+                args.tau_cut,
+                args.boundary_calibration_temperature,
+            )
+        )
+    else:
+        boundary_calibration_loss = out.readout_z.new_zeros(())
+        boundary_calibration_probability_gap = out.readout_z.new_zeros(())
+    if args.boundary_mode in {"confidence_threshold", "uniform_confidence_blend"}:
+        boundary_density_loss, boundary_density_gap = boundary_threshold_density_loss(
+            out.segmentor.confidence,
+            boundary_rate_target,
+            clean,
+            valid,
+            args.tau_cut,
+            args.boundary_calibration_temperature,
+        )
+    else:
+        boundary_density_loss = out.readout_z.new_zeros(())
+        boundary_density_gap = out.readout_z.new_zeros(())
+    if args.boundary_mode in {"confidence_threshold", "uniform_confidence_blend"}:
+        boundary_margin_loss, boundary_margin_shortfall = boundary_threshold_positive_margin_loss(
+            out.segmentor.confidence,
+            boundary_rate_target,
+            clean,
+            valid,
+            args.tau_cut,
+            args.boundary_rate_positive_margin,
+            args.boundary_calibration_temperature,
+        )
+    else:
+        boundary_margin_loss = out.readout_z.new_zeros(())
+        boundary_margin_shortfall = out.readout_z.new_zeros(())
+    if args.boundary_mode in {"confidence_threshold", "uniform_confidence_blend"}:
+        boundary_rate_dual_loss, boundary_rate_dual_constraint, boundary_rate_dual_predicted, boundary_rate_dual_target = (
+            boundary_rate_minimum_ratio_loss(
+                out.segmentor.confidence,
+                boundary_rate_target,
+                clean,
+                valid,
+                args.tau_cut,
+                args.boundary_calibration_temperature,
+                args.boundary_rate_min_ratio,
+                model.boundary_rate_dual.clone(),
+                args.boundary_rate_dual_augmented_weight,
+            )
+        )
+    else:
+        boundary_rate_dual_loss = out.readout_z.new_zeros(())
+        boundary_rate_dual_constraint = out.readout_z.new_zeros(())
+        boundary_rate_dual_predicted = out.readout_z.new_zeros(())
+        boundary_rate_dual_target = out.readout_z.new_zeros(())
+    if args.boundary_mode in {"confidence_threshold", "uniform_confidence_blend"}:
+        boundary_budget_loss, boundary_budget_constraint, requested_budget_chunks_per_byte, boundary_target_chunks_per_byte, requested_soft_chunks_per_byte = (
+            boundary_compute_budget_loss(
+                out.segmentor.confidence,
+                valid,
+                out.policy.force_continue,
+                args.tau_cut,
+                args.boundary_temperature,
+                args.boundary_target_bytes_per_chunk,
+                model.boundary_compute_dual.clone(),
+                args.boundary_budget_augmented_weight,
+            )
+        )
+    else:
+        boundary_budget_loss = out.readout_z.new_zeros(())
+        boundary_budget_constraint = out.readout_z.new_zeros(())
+        requested_budget_chunks_per_byte = out.readout_z.new_zeros(())
+        requested_soft_chunks_per_byte = out.readout_z.new_zeros(())
+        boundary_target_chunks_per_byte = out.readout_z.new_zeros(())
     if args.boundary_mode == "threshold":
         coding_rate_loss, coding_rate = projected_coding_rate_loss(
             out.readout_z, out.chunks.chunk_mask, args.coding_rate_dim
@@ -331,8 +661,8 @@ def step_model(
         on_active[:, :, sampled_emit_slot] = out.chunks.chunk_mask
         off_active[:, :, sampled_emit_slot] = False
 
-        on_identity_logits = model.decoder(on_z, out.chunks.chunk_mask)
-        off_identity_logits = model.decoder(off_z, out.chunks.chunk_mask)
+        on_identity_logits = model.decode(on_z, out.chunks.chunk_mask, on_active)
+        off_identity_logits = model.decode(off_z, out.chunks.chunk_mask, off_active)
         on_completed_logits, _ = _run_completion(
             model, backbone, on_z, on_active, affected_readouts, out.chunks.chunk_mask
         )
@@ -385,22 +715,66 @@ def step_model(
         )
         emit_value_mean = value[active_chunks].mean()
         emit_target_mean = target[active_chunks].mean()
+    continuation_weight = (
+        args.boundary_loss_weight
+        if args.boundary_continuation_loss_weight is None
+        else args.boundary_continuation_loss_weight
+    )
+    punctuation_weight = (
+        args.boundary_loss_weight
+        if args.boundary_punctuation_loss_weight is None
+        else args.boundary_punctuation_loss_weight
+    )
+    neutral_weight = (
+        args.boundary_loss_weight
+        if args.boundary_neutral_loss_weight is None
+        else args.boundary_neutral_loss_weight
+    )
+    weighted_boundary_prior = (
+        continuation_weight * boundary_components["continuation"]
+        + punctuation_weight * boundary_components["punctuation"]
+        + neutral_weight * boundary_components["neutral_mean"]
+    )
     loss = (
         args.identity_loss_weight * identity_loss
         + args.completion_loss_weight * masked_loss
         + args.preserve_loss_weight * preserve_loss
-        + args.boundary_loss_weight * boundary_loss
+        + weighted_boundary_prior
+        + args.boundary_rate_alignment_weight * boundary_rate_loss
+        + args.boundary_rate_calibration_weight * boundary_calibration_loss
+        + args.boundary_rate_density_weight * boundary_density_loss
+        + args.boundary_rate_margin_weight * boundary_margin_loss
+        + boundary_rate_dual_loss
+        + boundary_budget_loss
         + args.coding_rate_loss_weight * coding_rate_loss
         + args.memory_usage_loss_weight * memory_usage_loss
         + args.emit_value_loss_weight * emit_value_loss
         + args.ar_delta_loss_weight * out.ar_delta
     )
+    if (
+        model.training
+        and global_step >= 0
+        and args.boundary_mode in {"confidence_threshold", "uniform_confidence_blend"}
+    ):
+        with torch.no_grad():
+            model.boundary_compute_dual.add_(
+                float(args.boundary_dual_lr) * boundary_budget_constraint.detach()
+            ).clamp_(min=0.0, max=float(args.boundary_dual_max))
+            model.boundary_rate_dual.add_(
+                float(args.boundary_rate_dual_lr) * boundary_rate_dual_constraint.detach()
+            ).clamp_(min=0.0, max=float(args.boundary_rate_dual_max))
 
     metrics: Dict[str, float] = {}
     if collect_metrics:
         identity_pred = out.byte_logits.argmax(dim=-1)
         completed_pred = completed_logits.argmax(dim=-1)
         bytes_n = valid.float().sum().clamp(min=1.0)
+        clean_raw = (clean - 1).clamp(min=0, max=255)
+        eligible_boundary = valid & ~(clean_raw.ge(0x80) & clean_raw.le(0xBF))
+        if eligible_boundary.size(1):
+            eligible_boundary = eligible_boundary.clone()
+            eligible_boundary[:, 0] = False
+        eligible_boundary_n = eligible_boundary.float().sum().clamp(min=1.0)
         metrics = {
             "loss": float(loss.item()),
             "identity_loss": float(identity_loss.item()),
@@ -411,12 +785,64 @@ def step_model(
             "completion_mask_acc": _safe_acc(completed_pred, clean_targets, masked_slot),
             "completion_preserve_acc": _safe_acc(completed_pred, clean_targets, preserve_slot),
             "completion_ppl": float(torch.exp(masked_loss.detach().float().clamp(max=20)).item()),
+            "masked_byte_pseudo_ppl": float(torch.exp(masked_loss.detach().float().clamp(max=20)).item()),
+            "boundary_confidence_controls_execution": float(
+                args.boundary_mode in {"threshold", "confidence_threshold"}
+            ),
+            "boundary_confidence_controls_soft_bridge": float(
+                args.boundary_mode in {"threshold", "confidence_threshold", "uniform_confidence_blend"}
+            ),
+            "coding_score_controls_execution": float(args.boundary_mode == "marginal_rate_topk"),
+            "uniform_budget_controls_execution": float(
+                args.boundary_mode in {"uniform_budget", "uniform_l2_blend", "uniform_confidence_blend"}
+            ),
+            "boundary_rate_alignment_loss": float(boundary_rate_loss.item()),
+            "boundary_rate_calibration_loss": float(boundary_calibration_loss.item()),
+            "boundary_rate_calibration_probability_gap": float(
+                boundary_calibration_probability_gap.item()
+            ),
+            "boundary_rate_density_loss": float(boundary_density_loss.item()),
+            "boundary_rate_density_gap": float(boundary_density_gap.item()),
+            "boundary_rate_margin_loss": float(boundary_margin_loss.item()),
+            "boundary_rate_margin_shortfall": float(boundary_margin_shortfall.item()),
+            "boundary_rate_dual_loss": float(boundary_rate_dual_loss.item()),
+            "boundary_rate_dual_constraint": float(boundary_rate_dual_constraint.item()),
+            "boundary_rate_dual_predicted": float(boundary_rate_dual_predicted.item()),
+            "boundary_rate_dual_target": float(boundary_rate_dual_target.item()),
+            "boundary_rate_dual": float(model.boundary_rate_dual.item()),
+            "boundary_rate_target_mean": float(boundary_rate_target_mean.item()),
+            "confidence_rate_correlation": float(confidence_rate_correlation.item()),
+            "boundary_rate_target_cut_fraction": float(boundary_rate_target_cut_fraction.item()),
+            "boundary_compute_budget_loss": float(boundary_budget_loss.item()),
+            "boundary_compute_constraint": float(boundary_budget_constraint.item()),
+            "boundary_compute_dual": float(model.boundary_compute_dual.item()),
+            "requested_soft_chunks_per_byte": float(requested_soft_chunks_per_byte.item()),
+            "requested_budget_chunks_per_byte": float(requested_budget_chunks_per_byte.item()),
+            "boundary_target_chunks_per_byte": float(boundary_target_chunks_per_byte.item()),
             "hard_cut_fraction": float((out.policy.hard_cut & valid).float().sum().item() / bytes_n.item()),
+            "eligible_hard_cut_fraction": float(
+                (out.policy.hard_cut & eligible_boundary).float().sum().item()
+                / eligible_boundary_n.item()
+            ),
             "requested_hard_cut_fraction": float(
                 (out.aux["requested_hard_cut"] & valid).float().sum().item() / bytes_n.item()
             ),
+            "requested_eligible_hard_cut_fraction": float(
+                (out.aux["requested_hard_cut"] & eligible_boundary).float().sum().item()
+                / eligible_boundary_n.item()
+            ),
             "cut_capacity_overflow": float(out.aux["cut_capacity_overflow"].float().sum().item()),
+            "cut_capacity_overflow_per_byte": float(
+                out.aux["cut_capacity_overflow"].float().sum().item() / bytes_n.item()
+            ),
             "chunks_per_byte": float(out.chunks.chunk_mask.float().sum().item() / bytes_n.item()),
+            "forced_max_span_chunks_per_byte": float(
+                (
+                    out.chunks.chunk_mask.float().sum()
+                    - (out.policy.hard_cut & valid).float().sum()
+                ).clamp(min=0).item()
+                / bytes_n.item()
+            ),
             "ar_delta": float(out.ar_delta.item()),
             "coding_rate": float(coding_rate.item()),
             "memory_gate_mean": float(memory_gate_mean.item()),
@@ -489,20 +915,25 @@ def evaluate(model, backbone, loader, args, device) -> Dict[str, float]:
     model.eval()
     backbone.eval()
     rows: List[Dict[str, float]] = []
-    for index, batch in enumerate(loader):
-        if index >= args.max_eval_batches:
-            break
-        eval_step = index * args.emit_value_every if args.use_emit_controller else -1
-        _loss, metrics = step_model(
-            model,
-            backbone,
-            batch,
-            args,
-            device,
-            collect_metrics=True,
-            global_step=eval_step,
-        )
-        rows.append(metrics)
+    fork_devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
+    with torch.random.fork_rng(devices=fork_devices):
+        torch.manual_seed(args.eval_mask_seed)
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(args.eval_mask_seed)
+        for index, batch in enumerate(loader):
+            if index >= args.max_eval_batches:
+                break
+            eval_step = index * args.emit_value_every if args.use_emit_controller else -1
+            _loss, metrics = step_model(
+                model,
+                backbone,
+                batch,
+                args,
+                device,
+                collect_metrics=True,
+                global_step=eval_step,
+            )
+            rows.append(metrics)
     result = _avg_metrics(rows)
     result.update(order_probe(model, args.seq_len, device))
     model.train()
@@ -529,6 +960,7 @@ def run(args: argparse.Namespace) -> dict:
     (out_dir / "resolved_config.json").write_text(json.dumps(vars(args), ensure_ascii=False, indent=2), encoding="utf-8")
 
     model = build_model(args).to(device)
+    model.boundary_rate_dual = torch.zeros((), device=device)
     backbone = LatentInfillBackbone(
         args.d_model,
         args.backbone_hidden,
@@ -577,6 +1009,8 @@ def run(args: argparse.Namespace) -> dict:
                 torch.set_rng_state(resume_payload["torch_rng_state"].cpu())
             if device.type == "cuda" and "cuda_rng_state" in resume_payload:
                 torch.cuda.set_rng_state(resume_payload["cuda_rng_state"].cpu(), device)
+            if "boundary_rate_dual" in resume_payload:
+                model.boundary_rate_dual.copy_(resume_payload["boundary_rate_dual"].to(device))
             print(f"[resume] {latest_path} at completed_step={start_step}", flush=True)
 
     def checkpoint_payload(completed_step: int, summary: dict | None = None) -> dict:
@@ -594,6 +1028,7 @@ def run(args: argparse.Namespace) -> dict:
                 "coding_rate_mode": model.coding_rate_selector.mode,
                 "blend_alpha": float(model.config.boundary_blend_alpha),
             },
+            "boundary_rate_dual": model.boundary_rate_dual.detach().cpu(),
         }
         if device.type == "cuda":
             payload["cuda_rng_state"] = torch.cuda.get_rng_state(device)
@@ -631,6 +1066,17 @@ def run(args: argparse.Namespace) -> dict:
                 model, backbone, batch, args, device, collect_metrics=collect, global_step=step
             )
         loss.backward()
+        if collect:
+            segmentor_head_grads = [
+                parameter.grad.float().square().sum()
+                for parameter in model.segmentor_head.parameters()
+                if parameter.grad is not None
+            ]
+            metrics["segmentor_head_grad_norm"] = float(
+                torch.stack(segmentor_head_grads).sum().sqrt().item()
+                if segmentor_head_grads
+                else 0.0
+            )
         if collect and getattr(model, "_diagnostic_byte_input", None) is not None:
             byte_grad = model._diagnostic_byte_input.grad
             metrics["current_byte_input_grad_rms"] = (
@@ -723,6 +1169,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--eval-mask-seed", type=int, default=1042)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=False)
@@ -770,22 +1217,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--current-memory-scale-max", type=float, default=0.1)
     parser.add_argument(
         "--boundary-mode",
-        choices=["threshold", "marginal_rate_topk", "uniform_budget", "uniform_l2_blend"],
+        choices=["threshold", "confidence_threshold", "marginal_rate_topk", "uniform_budget", "uniform_l2_blend", "uniform_confidence_blend"],
         default="threshold",
     )
     parser.add_argument("--boundary-coding-rate-dim", type=int, default=16)
     parser.add_argument("--boundary-coding-rate-epsilon", type=float, default=1.0)
     parser.add_argument("--boundary-coding-rate-temperature", type=float, default=0.15)
-    parser.add_argument("--boundary-coding-rate-mode", choices=["exact", "l2"], default="exact")
+    parser.add_argument("--boundary-coding-rate-mode", choices=["exact", "diag", "l2"], default="exact")
     parser.add_argument("--boundary-blend-alpha", type=float, default=1.0)
     parser.add_argument("--boundary-curriculum-switch-step", type=int, default=0)
     parser.add_argument("--boundary-curriculum-transition-steps", type=int, default=0)
     parser.add_argument(
         "--boundary-curriculum-mode",
-        choices=["threshold", "marginal_rate_topk", "uniform_budget", "uniform_l2_blend"],
+        choices=["threshold", "confidence_threshold", "marginal_rate_topk", "uniform_budget", "uniform_l2_blend", "uniform_confidence_blend"],
         default="marginal_rate_topk",
     )
-    parser.add_argument("--boundary-curriculum-coding-rate-mode", choices=["exact", "l2"], default="l2")
+    parser.add_argument("--boundary-curriculum-coding-rate-mode", choices=["exact", "diag", "l2"], default="diag")
     parser.add_argument("--fixed-chunk-budget", type=int, default=0)
     parser.add_argument("--bytes-per-chunk-budget", type=int, default=16)
     parser.add_argument("--use-emit-controller", action=argparse.BooleanOptionalAction, default=False)
@@ -797,14 +1244,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tau-cut", type=float, default=0.9)
     parser.add_argument("--tau-trans", type=float, default=0.75)
     parser.add_argument("--boundary-temperature", type=float, default=0.15)
+    parser.add_argument("--boundary-bridge-gradient-scale", type=float, default=1.0)
     parser.add_argument("--noise-scale", type=float, default=0.02)
     parser.add_argument("--mask-prob", type=float, default=0.05)
     parser.add_argument("--mask-span-min", type=int, default=1)
     parser.add_argument("--mask-span-max", type=int, default=8)
+    parser.add_argument(
+        "--completion-mask-granularity",
+        choices=["chunk", "readout"],
+        default="chunk",
+        help="chunk reproduces historical v3.4 runs; readout restores the v3.3 slot-local mapping",
+    )
+    parser.add_argument(
+        "--decoder-mode",
+        choices=["legacy_independent", "shared_inverse"],
+        default="legacy_independent",
+    )
     parser.add_argument("--identity-loss-weight", type=float, default=1.0)
     parser.add_argument("--completion-loss-weight", type=float, default=2.0)
     parser.add_argument("--preserve-loss-weight", type=float, default=0.5)
     parser.add_argument("--boundary-loss-weight", type=float, default=0.02)
+    parser.add_argument("--boundary-continuation-loss-weight", type=float, default=None)
+    parser.add_argument("--boundary-punctuation-loss-weight", type=float, default=None)
+    parser.add_argument("--boundary-neutral-loss-weight", type=float, default=None)
+    parser.add_argument("--boundary-rate-alignment-weight", type=float, default=0.02)
+    parser.add_argument("--boundary-rate-calibration-weight", type=float, default=0.0)
+    parser.add_argument("--boundary-rate-density-weight", type=float, default=0.0)
+    parser.add_argument("--boundary-rate-margin-weight", type=float, default=0.0)
+    parser.add_argument("--boundary-rate-positive-margin", type=float, default=0.02)
+    parser.add_argument("--boundary-rate-min-ratio", type=float, default=0.8)
+    parser.add_argument("--boundary-rate-dual-lr", type=float, default=0.0)
+    parser.add_argument("--boundary-rate-dual-max", type=float, default=1.0)
+    parser.add_argument("--boundary-rate-dual-augmented-weight", type=float, default=0.0)
+    parser.add_argument("--boundary-calibration-temperature", type=float, default=0.1)
+    parser.add_argument("--boundary-target-bytes-per-chunk", type=int, default=16)
+    parser.add_argument("--boundary-dual-lr", type=float, default=0.05)
+    parser.add_argument("--boundary-dual-max", type=float, default=20.0)
+    parser.add_argument("--boundary-budget-augmented-weight", type=float, default=1.0)
     parser.add_argument("--coding-rate-loss-weight", type=float, default=0.01)
     parser.add_argument("--coding-rate-dim", type=int, default=64)
     parser.add_argument("--memory-usage-loss-weight", type=float, default=0.02)

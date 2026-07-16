@@ -1,5 +1,7 @@
 # FLUED v3.4 边界 ROI / 切分行为 CPU 评估协议
 
+> **2026-07-14 解释限制：** 默认 P4 路径的 hard cut 来自固定数量编码分数 Top-K，不来自 `tau_cut`；因此置信度热力图和 hard cut 必须作为两个控制器分别展示，不能把二者相关性当作执行因果。
+
 ## 目的
 
 本协议用于检查 v3.4 在固定文本上的边界与切分行为，不用于训练或改变 checkpoint。评估同时保留模型的有符号 confidence、策略层 hard cut、`ChunkBuilder` 的可执行 chunk 起点、逻辑转折、UTF-8 continuation 和 `max_span` 触发的强制边界，避免把这些信号混成一个“边界率”。

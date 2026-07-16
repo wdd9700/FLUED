@@ -21,15 +21,40 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--data-path", default=None)
     parser.add_argument("--only", default="")
+    parser.add_argument("--shared-overrides", default="")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--rerun-complete", action="store_true")
     args = parser.parse_args()
     matrix = json.loads((REPO_ROOT / args.matrix).read_text(encoding="utf-8"))
+    if "base_file" in matrix:
+        base_file = json.loads((REPO_ROOT / matrix["base_file"]).read_text(encoding="utf-8"))
+        matrix["base"] = {**base_file, **matrix.get("base", {})}
+    if "base_config" in matrix:
+        parent = json.loads((REPO_ROOT / matrix["base_config"]).read_text(encoding="utf-8"))
+        candidates = set(matrix.get("candidates", []))
+        base = dict(parent["base"])
+        for key in ("max_steps", "checkpoint_every", "milestone_every"):
+            if key in matrix:
+                base[key] = matrix[key]
+        matrix = {
+            "base": base,
+            "experiments": [
+                experiment
+                for experiment in parent["experiments"]
+                if not candidates or experiment["id"] in candidates
+            ],
+        }
     wanted = {x.strip() for x in args.only.split(",") if x.strip()}
+    shared_overrides = {}
+    if args.shared_overrides:
+        shared_path = Path(args.shared_overrides)
+        if not shared_path.is_absolute():
+            shared_path = REPO_ROOT / shared_path
+        shared_overrides = json.loads(shared_path.read_text(encoding="utf-8"))
     for experiment in matrix["experiments"]:
         if wanted and experiment["id"] not in wanted:
             continue
-        config = {**matrix["base"], **experiment["overrides"]}
+        config = {**matrix["base"], **shared_overrides, **experiment["overrides"]}
         if args.max_steps is not None:
             config["max_steps"] = args.max_steps
         if args.batch_size is not None:

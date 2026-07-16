@@ -1,0 +1,61 @@
+{
+  "matrix_name": "v34_memory_usage_supervision_20k",
+  "base_file": "configs/v3_4/v34_default_38m_20k.json",
+  "base": {
+    "data_path": "E:\\projects\\SoulMamba\\soulvlm_project\\temp\\corpus_v3.txt",
+    "max_steps": 20000,
+    "max_eval_batches": 32,
+    "checkpoint_every": 1000,
+    "milestone_every": 3000,
+    "use_memory": true,
+    "max_chunks": 64,
+    "use_structured_lookup": false,
+    "use_position": true,
+    "use_prompt_alibi": true,
+    "use_ar": true,
+    "emit_forward_mode": "hard_st",
+    "completion_mask_granularity": "readout",
+    "decoder_mode": "shared_inverse",
+    "boundary_continuation_loss_weight": 0.01,
+    "boundary_punctuation_loss_weight": 0.1,
+    "boundary_neutral_loss_weight": 0.1,
+    "boundary_rate_calibration_weight": 0.2,
+    "boundary_rate_density_weight": 0.0,
+    "boundary_rate_margin_weight": 0.1,
+    "boundary_rate_positive_margin": 0.02,
+    "boundary_calibration_temperature": 0.1,
+    "boundary_curriculum_switch_step": 3000,
+    "boundary_curriculum_transition_steps": 500,
+    "boundary_curriculum_coding_rate_mode": "diag",
+    "memory_usage_min": 0.2,
+    "memory_usage_max": 0.5,
+    "resume": true
+  },
+  "experiments": [
+    {
+      "id": "m_control_no_memory",
+      "overrides": {
+        "use_memory": false,
+        "memory_usage_loss_weight": 0.0
+      }
+    },
+    {
+      "id": "m0_no_usage_supervision",
+      "overrides": {
+        "memory_usage_loss_weight": 0.0
+      }
+    },
+    {
+      "id": "m1_gate_usage_supervision_w002",
+      "overrides": {
+        "memory_usage_loss_weight": 0.02
+      }
+    },
+    {
+      "id": "m2_gate_usage_supervision_w005",
+      "overrides": {
+        "memory_usage_loss_weight": 0.05
+      }
+    }
+  ]
+}

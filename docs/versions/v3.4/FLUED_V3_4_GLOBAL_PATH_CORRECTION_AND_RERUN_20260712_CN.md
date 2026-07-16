@@ -1,5 +1,7 @@
 # FLUED v3.4 全局路径纠偏与消融重跑范围
 
+> **历史决策文档：** 本文记录 2026-07-12 的纠偏范围。其后 P4 实际未启用 memory 位置编码，默认边界也仍为固定数量 Top-K；当前结论以 2026-07-14 全量自查为准。
+
 > 本文记录第一轮纠偏及其当时结果。后续 P0-P4 严格串行实验加入提示级 ALiBi、memory 位置对照和无仿射 LayerNorm，并完成 20K 三组确认；当前默认结论见 [`FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md`](FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md)。
 
 ## 1. 根因

@@ -1,0 +1,41 @@
+{
+  "matrix_name": "v34_decoder_rate_final_20k",
+  "base_file": "configs/v3_4/v34_default_38m_20k.json",
+  "base": {
+    "data_path": "E:\\projects\\SoulMamba\\soulvlm_project\\temp\\corpus_v3.txt",
+    "max_steps": 20000,
+    "max_eval_batches": 32,
+    "boundary_curriculum_switch_step": 3000,
+    "boundary_curriculum_transition_steps": 500,
+    "checkpoint_every": 1000,
+    "milestone_every": 3000,
+    "use_memory": false,
+    "resume": true
+  },
+  "experiments": [
+    {
+      "id": "d0_shared_diag_reference",
+      "overrides": {
+        "decoder_mode": "shared_inverse",
+        "boundary_coding_rate_mode": "diag",
+        "boundary_curriculum_coding_rate_mode": "diag"
+      }
+    },
+    {
+      "id": "d1_legacy_diag",
+      "overrides": {
+        "decoder_mode": "legacy_independent",
+        "boundary_coding_rate_mode": "diag",
+        "boundary_curriculum_coding_rate_mode": "diag"
+      }
+    },
+    {
+      "id": "d2_shared_l2",
+      "overrides": {
+        "decoder_mode": "shared_inverse",
+        "boundary_coding_rate_mode": "l2",
+        "boundary_curriculum_coding_rate_mode": "l2"
+      }
+    }
+  ]
+}

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import inspect
+import json
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 import torch
@@ -14,11 +16,19 @@ from flued.v34.model import (
     FLUEDV34ProbeConfig,
     SpanDecoder,
     _bidirectional_alibi_bias,
+    _plastic_signed_confidence,
     _sinusoidal_position,
     load_v34_state_dict_compatible,
 )
 from flued.v34.rate_emit import MarginalCodingRateSelector, ReadoutEmitController
-from tools.train.v3_4.train_v34_pos_ar_probe import apply_boundary_curriculum
+from tools.train.v3_4.train_v34_pos_ar_probe import (
+    apply_boundary_curriculum,
+    boundary_compute_budget_loss,
+    boundary_threshold_calibration_loss,
+    boundary_threshold_density_loss,
+    boundary_threshold_positive_margin_loss,
+    boundary_rate_minimum_ratio_loss,
+)
 
 
 def _tiny_model() -> FLUEDV34Probe:
@@ -208,6 +218,24 @@ def test_v34_uniform_budget_is_lossless_and_avoids_utf8_continuations() -> None:
     continuation = raw.ge(0x80) & raw.le(0xBF)
     assert not out.policy.hard_cut[continuation].any()
     assert out.chunks.pack_info["truncated_tokens"].sum().item() == 0
+
+
+def test_v34_capacity_guard_applies_to_clustered_coding_rate_cuts() -> None:
+    requested = torch.zeros(1, 64, dtype=torch.bool)
+    requested[:, :12] = True
+    valid = torch.ones_like(requested)
+
+    executed, overflow = FLUEDV34Probe._capacity_safe_cuts(
+        requested,
+        valid,
+        max_chunks=8,
+        max_span=16,
+    )
+
+    # Four chunks may still be forced by max_span, so only five requested
+    # starts are safe (the first start overlaps the first forced span).
+    assert executed.sum().item() == 5
+    assert overflow.item() == 7
 
 
 def test_v34_boundary_curriculum_switches_once_at_requested_step() -> None:
@@ -653,3 +681,233 @@ def test_v34_memory_scale_ablation_parameter_count_is_constant() -> None:
     ]
     counts = {sum(parameter.numel() for parameter in FLUEDV34Probe(config).parameters()) for config in configs}
     assert len(counts) == 1
+
+
+def test_v34_diagonal_rate_is_prefix_marginal_not_pointwise_energy() -> None:
+    torch.manual_seed(42)
+    selector = MarginalCodingRateSelector(dim=8, rate_dim=4, epsilon=1.0, mode="diag")
+    features = torch.randn(2, 7, 8)
+    actual = selector.marginal_rate(features)
+    normalized = selector.norm(features).float()
+    prefix = normalized.square().cumsum(dim=1)
+    total = 0.5 * torch.log1p(prefix).mean(dim=-1)
+    expected = total - torch.cat([torch.zeros_like(total[:, :1]), total[:, :-1]], dim=1)
+    assert torch.allclose(actual, expected, atol=1.0e-6, rtol=1.0e-6)
+
+
+def test_v34_confidence_threshold_main_loss_reaches_boundary_head() -> None:
+    model = FLUEDV34Probe(
+        FLUEDV34ProbeConfig(
+            d_model=32,
+            nhead=4,
+            ffn_dim=64,
+            segmentor_layers=1,
+            interpreter_layers=1,
+            memory_rank=2,
+            readout_vectors=4,
+            ar_hidden=8,
+            use_ar=False,
+            use_memory=False,
+            boundary_mode="confidence_threshold",
+            coding_rate_mode="diag",
+            max_chunks=8,
+            max_span=16,
+            noise_scale=0.0,
+        )
+    ).train()
+    ids = torch.tensor([text_to_byte_ids("confidence must own the differentiable boundary path")[:48]])
+    model(ids).readout_z.float().square().mean().backward()
+    grad = model.segmentor_head[-1].weight.grad
+    assert grad is not None and grad.abs().sum().item() > 0
+
+
+def test_v34_shared_inverse_decoder_reuses_interpreter_without_parameters() -> None:
+    model = FLUEDV34Probe(
+        FLUEDV34ProbeConfig(
+            d_model=32,
+            nhead=4,
+            ffn_dim=64,
+            segmentor_layers=1,
+            interpreter_layers=2,
+            memory_rank=2,
+            readout_vectors=4,
+            ar_hidden=8,
+            use_memory=False,
+            boundary_mode="uniform_budget",
+            bytes_per_chunk_budget=8,
+            max_chunks=8,
+            max_span=16,
+            noise_scale=0.0,
+            decoder_mode="shared_inverse",
+        )
+    ).train()
+    ids = torch.tensor([text_to_byte_ids("shared inverse decoder")])
+    out = model(ids)
+    assert out.byte_logits.shape[-2:] == (16, 258)
+    assert sum(parameter.numel() for parameter in model.decoder.parameters()) == 0
+    out.byte_logits.float().square().mean().backward()
+    grad = model.interpreter_blocks[-1].ff_out.weight.grad
+    assert grad is not None and grad.abs().sum().item() > 0
+
+
+def test_v34_canonical_configs_enable_corrected_paths() -> None:
+    root = Path(__file__).resolve().parents[1]
+    for name in (
+        "v34_default_38m_20k.json",
+        "v34_full_333m_backbone_107m_4096.json",
+    ):
+        config = json.loads((root / "configs" / "v3_4" / name).read_text(encoding="utf-8"))
+        assert config["boundary_curriculum_mode"] == "confidence_threshold"
+        assert config["boundary_curriculum_coding_rate_mode"] == "diag"
+        assert config["completion_mask_granularity"] == "readout"
+        assert config["decoder_mode"] == "shared_inverse"
+        assert config["boundary_target_bytes_per_chunk"] == 16
+        assert config["boundary_bridge_gradient_scale"] == 0.1
+        assert config["boundary_rate_alignment_weight"] == 0.2
+
+
+def test_v34_boundary_compute_budget_prices_dense_soft_cuts() -> None:
+    valid = torch.ones(2, 32, dtype=torch.bool)
+    force_continue = torch.zeros_like(valid)
+    dense = torch.full((2, 32), 0.99, requires_grad=True)
+    loss, constraint, density, target, soft_density = boundary_compute_budget_loss(
+        dense,
+        valid,
+        force_continue,
+        tau_cut=0.9,
+        temperature=0.15,
+        bytes_per_chunk=16,
+        dual_value=torch.tensor(1.0),
+        augmented_weight=1.0,
+    )
+    assert constraint.item() > 0
+    assert density.item() > target.item()
+    assert soft_density.item() > target.item()
+    loss.backward()
+    assert dense.grad is not None
+    assert dense.grad.mean().item() > 0
+
+    sparse = torch.full((2, 32), -0.5)
+    sparse_loss, sparse_constraint, sparse_density, _, _ = boundary_compute_budget_loss(
+        sparse,
+        valid,
+        force_continue,
+        tau_cut=0.9,
+        temperature=0.15,
+        bytes_per_chunk=16,
+        dual_value=torch.tensor(0.0),
+        augmented_weight=1.0,
+    )
+    assert sparse_constraint.item() < 0
+    assert sparse_density.item() < target.item()
+    assert sparse_loss.item() == 0.0
+
+    just_below = torch.full((2, 32), 0.89)
+    _, below_constraint, priced_density, _, continuous_density = boundary_compute_budget_loss(
+        just_below,
+        valid,
+        force_continue,
+        tau_cut=0.9,
+        temperature=0.15,
+        bytes_per_chunk=16,
+        dual_value=torch.tensor(1.0),
+        augmented_weight=1.0,
+    )
+    assert below_constraint.item() < 0
+    assert priced_density.item() < target.item()
+    assert continuous_density.item() > target.item()
+
+
+def test_v34_signed_confidence_remains_plastic_at_both_poles() -> None:
+    logits = torch.tensor([-20.0, 20.0], requires_grad=True)
+    confidence = _plastic_signed_confidence(logits)
+    assert confidence.tolist() == [-1.0, 1.0]
+    confidence.sum().backward()
+    assert torch.equal(logits.grad, torch.ones_like(logits))
+
+
+def test_v34_boundary_calibration_is_continuous_and_directional() -> None:
+    confidence = torch.tensor([[0.2, 0.2, 0.2]], requires_grad=True)
+    target = torch.tensor([[0.0, 0.98, -0.5]])
+    token_ids = torch.tensor([[98, 99, 100]])
+    valid = torch.ones_like(token_ids, dtype=torch.bool)
+    loss, gap = boundary_threshold_calibration_loss(
+        confidence,
+        target,
+        token_ids,
+        valid,
+        tau_cut=0.9,
+        temperature=0.1,
+    )
+    assert loss.item() > 0
+    assert gap.item() > 0
+    loss.backward()
+    assert confidence.grad is not None
+    assert confidence.grad[0, 1].item() < 0
+    assert confidence.grad[0, 2].item() > 0
+
+
+def test_v34_boundary_density_uses_hard_count_with_continuous_gradient() -> None:
+    confidence = torch.tensor([[0.0, 0.85, 0.1, 0.1]], requires_grad=True)
+    target = torch.tensor([[0.0, 0.95, -0.2, -0.3]])
+    token_ids = torch.tensor([[98, 99, 100, 101]])
+    valid = torch.ones_like(token_ids, dtype=torch.bool)
+    loss, gap = boundary_threshold_density_loss(
+        confidence,
+        target,
+        token_ids,
+        valid,
+        tau_cut=0.9,
+        temperature=0.1,
+    )
+    assert loss.item() > 0
+    assert gap.item() > 0
+    loss.backward()
+    assert confidence.grad is not None
+    assert confidence.grad[0, 1].item() < 0
+
+
+def test_v34_boundary_positive_margin_pushes_only_rate_positive_positions() -> None:
+    confidence = torch.tensor([[0.0, 0.4, 0.4]], requires_grad=True)
+    target = torch.tensor([[0.0, 0.95, -0.5]])
+    token_ids = torch.tensor([[98, 99, 100]])
+    valid = torch.ones_like(token_ids, dtype=torch.bool)
+    loss, shortfall = boundary_threshold_positive_margin_loss(
+        confidence,
+        target,
+        token_ids,
+        valid,
+        tau_cut=0.9,
+        margin=0.02,
+        temperature=0.1,
+    )
+    assert loss.item() > 0
+    assert shortfall.item() > 0
+    loss.backward()
+    assert confidence.grad is not None
+    assert confidence.grad[0, 1].item() < 0
+    assert confidence.grad[0, 2].item() == 0
+
+
+def test_v34_boundary_rate_dual_pushes_up_only_when_below_minimum_ratio() -> None:
+    confidence = torch.tensor([[0.0, 0.4, 0.2]], requires_grad=True)
+    target = torch.tensor([[0.0, 0.95, -0.5]])
+    token_ids = torch.tensor([[98, 99, 100]])
+    valid = torch.ones_like(token_ids, dtype=torch.bool)
+    loss, constraint, predicted, target_density = boundary_rate_minimum_ratio_loss(
+        confidence,
+        target,
+        token_ids,
+        valid,
+        tau_cut=0.9,
+        temperature=0.1,
+        minimum_ratio=0.8,
+        dual_value=torch.tensor(0.5),
+        augmented_weight=1.0,
+    )
+    assert constraint.item() > 0
+    assert predicted.item() == 0
+    assert target_density.item() > 0
+    loss.backward()
+    assert confidence.grad is not None
+    assert confidence.grad[0, 1].item() < 0

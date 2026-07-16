@@ -65,6 +65,12 @@ def _sinusoidal_position(seq: int, dim: int, device: torch.device, dtype: torch.
     return encoded.to(dtype)
 
 
+def _plastic_signed_confidence(logits: torch.Tensor) -> torch.Tensor:
+    """Keep [-1, 1] forward values without irreversible tanh saturation."""
+    bounded = torch.tanh(logits)
+    return logits + (bounded - logits).detach()
+
+
 def _alibi_slopes(nhead: int, device: torch.device) -> torch.Tensor:
     """Fixed geometric head slopes for bidirectional byte-distance ALiBi."""
     head = torch.arange(1, nhead + 1, device=device, dtype=torch.float32)
@@ -150,15 +156,41 @@ class DiTStyleBlock(nn.Module):
         x = x + self.ff_scale.to(x.dtype) * ff
         return x * valid.unsqueeze(-1).to(x.dtype)
 
+    def inverse_block(
+        self,
+        x: torch.Tensor,
+        valid: torch.Tensor,
+        noise_level: torch.Tensor,
+    ) -> torch.Tensor:
+        """First-order tied-weight inverse approximation.
+
+        This reverses residual order and subtracts the same FFN/attention
+        updates. It deliberately reuses encoder/interpreter parameters rather
+        than training a second decoder stack; it is not an exact inverse.
+        """
+        cond = self.noise_cond(noise_level.view(-1, 1)).unsqueeze(1).to(x.dtype)
+        ff_gate, ff_value = self.ff_in(self.norm2(x + cond)).chunk(2, dim=-1)
+        ff = self.ff_out(F.silu(ff_gate) * ff_value)
+        x = x - self.ff_scale.to(x.dtype) * ff
+        x = x - self.attn_scale.to(x.dtype) * self.attn(self.norm1(x + cond), valid)
+        return x * valid.unsqueeze(-1).to(x.dtype)
+
 
 class SoftBoundaryBridge(nn.Module):
     """Hard forward chunks with a differentiable soft-assignment backward path."""
 
-    def __init__(self, max_chunks: int, tau_cut: float, temperature: float = 0.35) -> None:
+    def __init__(
+        self,
+        max_chunks: int,
+        tau_cut: float,
+        temperature: float = 0.35,
+        gradient_scale: float = 1.0,
+    ) -> None:
         super().__init__()
         self.max_chunks = int(max_chunks)
         self.tau_cut = float(tau_cut)
         self.temperature = float(temperature)
+        self.gradient_scale = float(gradient_scale)
 
     def forward(
         self,
@@ -190,7 +222,7 @@ class SoftBoundaryBridge(nn.Module):
         hard_denom = hard_mask.sum(dim=2).clamp(min=1.0)
         hard_mean = (chunks.span_embeddings * hard_mask).sum(dim=2) / hard_denom
         straight_through = soft_mean + (hard_mean - soft_mean).detach()
-        bridge = (straight_through - hard_mean).unsqueeze(2)
+        bridge = self.gradient_scale * (straight_through - hard_mean).unsqueeze(2)
         span_embeddings = chunks.span_embeddings + bridge * chunks.token_mask.unsqueeze(-1).to(bridge.dtype)
         return ChunkBatch(
             span_embeddings=span_embeddings,
@@ -427,6 +459,8 @@ class SmallChunkARCorrection(nn.Module):
 
 
 class SpanDecoder(nn.Module):
+    """Historical independently-parameterized v3.4 decoder."""
+
     def __init__(self, dim: int, hidden: int, max_span: int, byte_lookup: StructuredByteLookup) -> None:
         super().__init__()
         self.max_span = max_span
@@ -451,6 +485,81 @@ class SpanDecoder(nn.Module):
         table = self.byte_lookup(vocab).to(h.dtype)
         logits = self.scale.clamp(1.0, 100.0) * torch.matmul(
             F.normalize(h, dim=-1), F.normalize(table, dim=-1).transpose(0, 1)
+        )
+        return logits.masked_fill(~chunk_mask.unsqueeze(-1).unsqueeze(-1), 0.0)
+
+
+class SharedInverseSpanDecoder(nn.Module):
+    """Parameter-free wrapper around the interpreter's tied inverse path.
+
+    Span expansion uses the readout pool's transposed projections plus a fixed
+    positional bias. Interpreter blocks then run in reverse order through
+    their first-order inverse approximation. The only output basis is the
+    encoder's active byte lookup table.
+    """
+
+    def __init__(self, dim: int, max_span: int) -> None:
+        super().__init__()
+        self.dim = int(dim)
+        self.max_span = int(max_span)
+
+    def forward(
+        self,
+        readout: torch.Tensor,
+        chunk_mask: torch.Tensor,
+        readout_active: torch.Tensor,
+        readout_pool: QueryPool,
+        interpreter_blocks: nn.ModuleList,
+        byte_lookup: nn.Module,
+    ) -> torch.Tensor:
+        bsz, chunks, readouts, dim = readout.shape
+        flat = bsz * chunks
+        active = readout_active.reshape(flat, readouts) & chunk_mask.reshape(-1, 1)
+        # The fallback slot is a structural invariant and prevents an empty
+        # attention row even when all optional readouts remain silent.
+        if readouts:
+            active = active.clone()
+            active[:, 0] = chunk_mask.reshape(-1)
+
+        z = readout.reshape(flat, readouts, dim)
+        # Reverse the interpreter at the same R-readout resolution used by the
+        # encoder. Expanding to max_span first would be both the wrong inverse
+        # order and an O(max_span^2) decoder bottleneck.
+        zero_noise = readout.new_zeros(flat)
+        for block in reversed(interpreter_blocks):
+            z = block.inverse_block(z, active, zero_noise)
+
+        slot_basis = _sinusoidal_position(
+            self.max_span, dim, readout.device, readout.dtype
+        ).unsqueeze(0).expand(flat, -1, -1)
+        q = F.linear(slot_basis, readout_pool.k_proj.weight)
+        k = F.linear(z, readout_pool.q_proj.weight)
+        score = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(dim)
+
+        slot_coordinate = torch.linspace(
+            0.0,
+            float(max(readouts - 1, 0)),
+            self.max_span,
+            device=readout.device,
+            dtype=score.dtype,
+        )
+        readout_coordinate = torch.arange(readouts, device=readout.device, dtype=score.dtype)
+        score = score - (slot_coordinate[:, None] - readout_coordinate[None, :]).abs()
+        score = score.masked_fill(~active.unsqueeze(1), float("-inf"))
+        weight = torch.nan_to_num(score.softmax(dim=-1))
+
+        # Approximate the reverse of out(V(span)) without introducing decoder
+        # parameters. Linear transposes are tied to the encoder pool.
+        value = F.linear(z, readout_pool.out.weight.transpose(0, 1))
+        expanded = torch.matmul(weight, value)
+        expanded = F.linear(expanded, readout_pool.v_proj.weight.transpose(0, 1))
+        expanded = expanded.reshape(bsz, chunks, self.max_span, dim)
+
+        vocab = torch.arange(258, device=readout.device)
+        table = byte_lookup(vocab).to(expanded.dtype)
+        logits = 10.0 * torch.matmul(
+            F.normalize(expanded, dim=-1),
+            F.normalize(table, dim=-1).transpose(0, 1),
         )
         return logits.masked_fill(~chunk_mask.unsqueeze(-1).unsqueeze(-1), 0.0)
 
@@ -500,7 +609,9 @@ class FLUEDV34ProbeConfig:
     tau_cut: float = 0.9
     tau_trans: float = 0.75
     boundary_temperature: float = 0.15
+    boundary_bridge_gradient_scale: float = 1.0
     noise_scale: float = 0.02
+    decoder_mode: str = "legacy_independent"
 
 
 @dataclass
@@ -543,8 +654,16 @@ class FLUEDV34Probe(nn.Module):
         )
         self.segmentor_head = nn.Sequential(nn.LayerNorm(c.d_model), nn.Linear(c.d_model, 1))
         self.policy = FixedDualThresholdPolicy(c.tau_cut, c.tau_trans)
+        # Persistent training-state price for batch-level chunk compute. It is
+        # deliberately a buffer rather than a learned architecture parameter.
+        self.register_buffer("boundary_compute_dual", torch.zeros(()), persistent=True)
         self.chunk_builder = ChunkBuilder(c.max_chunks, c.max_span)
-        self.boundary_bridge = SoftBoundaryBridge(c.max_chunks, c.tau_cut, c.boundary_temperature)
+        self.boundary_bridge = SoftBoundaryBridge(
+            c.max_chunks,
+            c.tau_cut,
+            c.boundary_temperature,
+            c.boundary_bridge_gradient_scale,
+        )
         self.memory_pool = QueryPool(c.d_model, c.memory_rank, c.nhead, layer_rope)
         self.readout_pool = QueryPool(c.d_model, c.readout_vectors, c.nhead, layer_rope)
         memory_position_mode = c.memory_position_mode
@@ -596,11 +715,16 @@ class FLUEDV34Probe(nn.Module):
             c.memory_rank,
             c.readout_vectors,
         )
-        self.decoder = SpanDecoder(c.d_model, c.ffn_dim, c.max_span, self.byte_lookup)
+        if c.decoder_mode == "legacy_independent":
+            self.decoder = SpanDecoder(c.d_model, c.ffn_dim, c.max_span, self.byte_lookup)
+        elif c.decoder_mode == "shared_inverse":
+            self.decoder = SharedInverseSpanDecoder(c.d_model, c.max_span)
+        else:
+            raise ValueError("decoder_mode must be legacy_independent or shared_inverse")
         # Instantiate the ablation table last so enabling the switch does not
         # perturb initialization of the shared architecture.
         self.plain_byte_lookup = PlainByteLookup(c.d_model)
-        if not c.use_structured_lookup:
+        if not c.use_structured_lookup and c.decoder_mode == "legacy_independent":
             self.decoder.byte_lookup = self.plain_byte_lookup
         # New v3.4 rate/emit modules are initialized last so legacy-mode shared
         # modules retain their historical initialization order.
@@ -705,7 +829,7 @@ class FLUEDV34Probe(nn.Module):
         for block in self.segmentor_blocks:
             h = block(h, valid, noise)
         boundary_logits = self.segmentor_head(h).squeeze(-1)
-        confidence = torch.tanh(boundary_logits).masked_fill(~valid, 0.0)
+        confidence = _plastic_signed_confidence(boundary_logits).masked_fill(~valid, 0.0)
         segmentor = SegmentorOutput(confidence, boundary_logits.masked_fill(~valid, 0.0), {"one_shot": True})
         policy = self.policy(confidence, valid)
         raw = (token_ids - 1).clamp(min=0, max=255)
@@ -719,6 +843,7 @@ class FLUEDV34Probe(nn.Module):
             aux={**policy.aux, "utf8_continuation_hard_guard": True},
         )
         coding_selection = None
+        boundary_rate = confidence.new_zeros(confidence.shape)
         if c.boundary_mode in {"marginal_rate_topk", "uniform_l2_blend"}:
             anchor_score = None
             if c.boundary_mode == "uniform_l2_blend":
@@ -740,15 +865,51 @@ class FLUEDV34Probe(nn.Module):
                 blend_alpha=c.boundary_blend_alpha,
             )
             requested_hard_cut = coding_selection.hard_cut
-            executable_hard_cut = requested_hard_cut
-            cut_overflow = torch.zeros(token_ids.size(0), device=token_ids.device, dtype=torch.long)
+            executable_hard_cut, cut_overflow = self._capacity_safe_cuts(
+                requested_hard_cut, valid, c.max_chunks, c.max_span
+            )
+            boundary_rate = coding_selection.marginal_rate
         elif c.boundary_mode == "uniform_budget":
             coding_selection = self._uniform_budget_selection(
                 valid, utf8_cont, c.max_chunks, c.bytes_per_chunk_budget, confidence
             )
             requested_hard_cut = coding_selection.hard_cut
-            executable_hard_cut = requested_hard_cut
-            cut_overflow = torch.zeros(token_ids.size(0), device=token_ids.device, dtype=torch.long)
+            executable_hard_cut, cut_overflow = self._capacity_safe_cuts(
+                requested_hard_cut, valid, c.max_chunks, c.max_span
+            )
+        elif c.boundary_mode == "uniform_confidence_blend":
+            uniform = self._uniform_budget_selection(
+                valid, utf8_cont, c.max_chunks, c.bytes_per_chunk_budget, confidence
+            )
+            boundary_rate = self.coding_rate_selector.marginal_rate(h)
+            confidence_soft = torch.sigmoid(
+                (confidence.float() - c.tau_cut) / c.boundary_temperature
+            )
+            confidence_soft = confidence_soft * valid.float() * (~force_continue).float()
+            if confidence_soft.size(1):
+                confidence_soft = confidence_soft.clone()
+                confidence_soft[:, 0] = valid[:, 0].float()
+            alpha = min(max(float(c.boundary_blend_alpha), 0.0), 1.0)
+            soft_cut = (1.0 - alpha) * uniform.soft_cut + alpha * confidence_soft
+            coding_selection = CodingRateSelection(
+                marginal_rate=boundary_rate,
+                hard_cut=uniform.hard_cut,
+                soft_cut=soft_cut,
+                target_chunks=uniform.target_chunks,
+            )
+            requested_hard_cut = uniform.hard_cut
+            executable_hard_cut, cut_overflow = self._capacity_safe_cuts(
+                requested_hard_cut, valid, c.max_chunks, c.max_span
+            )
+        elif c.boundary_mode == "confidence_threshold":
+            # The fixed signed-confidence threshold owns the executable
+            # segmentation. Main-task gradients reach it through the soft
+            # boundary bridge; coding rate remains a training/diagnostic signal.
+            boundary_rate = self.coding_rate_selector.marginal_rate(h)
+            requested_hard_cut = threshold_policy.hard_cut
+            executable_hard_cut, cut_overflow = self._capacity_safe_cuts(
+                requested_hard_cut, valid, c.max_chunks, c.max_span
+            )
         elif c.boundary_mode == "threshold":
             requested_hard_cut = threshold_policy.hard_cut
             executable_hard_cut, cut_overflow = self._capacity_safe_cuts(
@@ -944,7 +1105,7 @@ class FLUEDV34Probe(nn.Module):
             readout = readout_candidates
             emit_hard = chunks.chunk_mask.unsqueeze(-1).expand_as(emit.hard)
             emit = type(emit)(emit.logits, emit.soft, emit_hard, emit_hard.to(emit.soft.dtype))
-        logits = self.decoder(readout, chunks.chunk_mask)
+        logits = self.decode(readout, chunks.chunk_mask, emit.hard)
         return V34ProbeOutput(
             byte_logits=logits,
             readout_z=readout,
@@ -988,10 +1149,30 @@ class FLUEDV34Probe(nn.Module):
                 ),
                 "requested_hard_cut": requested_hard_cut,
                 "cut_capacity_overflow": cut_overflow,
-                "marginal_coding_rate": coding_selection.marginal_rate if coding_selection is not None else confidence.new_zeros(confidence.shape),
+                "marginal_coding_rate": boundary_rate,
                 "target_chunks": coding_selection.target_chunks if coding_selection is not None else chunks.chunk_mask.sum(dim=1),
                 "boundary_blend_alpha": confidence.new_tensor(float(c.boundary_blend_alpha)),
             },
+        )
+
+    def decode(
+        self,
+        readout: torch.Tensor,
+        chunk_mask: torch.Tensor,
+        readout_active: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.config.decoder_mode == "legacy_independent":
+            return self.decoder(readout, chunk_mask)
+        if readout_active is None:
+            readout_active = chunk_mask.unsqueeze(-1).expand(readout.shape[:-1])
+        active_lookup = self.byte_lookup if self.config.use_structured_lookup else self.plain_byte_lookup
+        return self.decoder(
+            readout,
+            chunk_mask,
+            readout_active,
+            self.readout_pool,
+            self.interpreter_blocks,
+            active_lookup,
         )
 
     def forward(self, token_ids: torch.Tensor) -> V34ProbeOutput:

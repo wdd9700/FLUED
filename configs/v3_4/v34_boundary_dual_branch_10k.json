@@ -1,0 +1,30 @@
+{
+  "matrix_name": "v34_boundary_dual_branch_10k",
+  "base_file": "configs/v3_4/v34_default_38m_20k.json",
+  "base": {
+    "data_path": "E:\\projects\\SoulMamba\\soulvlm_project\\temp\\corpus_v3.txt",
+    "max_steps": 10000,
+    "max_eval_batches": 32,
+    "boundary_curriculum_switch_step": 3000,
+    "boundary_curriculum_transition_steps": 500,
+    "checkpoint_every": 1000,
+    "milestone_every": 1000,
+    "resume": true,
+    "max_chunks": 64,
+    "boundary_continuation_loss_weight": 0.01,
+    "boundary_punctuation_loss_weight": 0.10,
+    "boundary_neutral_loss_weight": 0.10,
+    "boundary_rate_calibration_weight": 0.2,
+    "boundary_rate_density_weight": 0.0,
+    "boundary_rate_margin_weight": 0.10,
+    "boundary_rate_positive_margin": 0.02,
+    "boundary_rate_min_ratio": 0.8,
+    "boundary_rate_dual_lr": 0.01,
+    "boundary_rate_dual_max": 1.0,
+    "boundary_rate_dual_augmented_weight": 1.0,
+    "boundary_calibration_temperature": 0.1
+  },
+  "experiments": [
+    {"id": "b10_adaptive_dual_from5k", "overrides": {}}
+  ]
+}

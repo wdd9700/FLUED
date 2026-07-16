@@ -1,0 +1,18 @@
+{
+  "date": "2026-07-14",
+  "checkpoint": "L:/FLUED_archive/v34_serial_experiments_20260713/p4_b_other_memory_only/latest.pt",
+  "protocol": "Same checkpoint and fixed evaluation batches; toggle model.config.use_memory only; eight mask seeds.",
+  "delta_definition": "memory_off - memory_on",
+  "means": {
+    "identity_accuracy": -0.000560760498046875,
+    "completion_accuracy": -0.0024592806585133076,
+    "completion_cross_entropy": -0.008569393306970596,
+    "preserve_accuracy": -0.0015750833196181059,
+    "actual_latent_per_byte": 0.0016117095947265625
+  },
+  "standard_deviation": {
+    "completion_accuracy": 0.002667,
+    "completion_cross_entropy": 0.008769
+  },
+  "interpretation": "Memory has a small immediate causal effect on argmax accuracies, but no robust cross-entropy benefit. The larger cross-run P4 gain is likely dominated by optimization-path or regularization effects rather than inference-time memory content alone."
+}

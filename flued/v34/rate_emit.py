@@ -15,10 +15,13 @@ class CodingRateSelection:
 
 
 class MarginalCodingRateSelector(nn.Module):
-    """ByteFlow-style marginal coding rate with fixed/bucketed Top-K.
+    """Marginal coding-rate scores and historical fixed-budget Top-K.
 
     The exact path computes all prefix log-determinants in parallel in a small
-    projected feature space. The l2 path is the low-cost screening ablation.
+    projected feature space. ``diag`` is a parallel diagonal-covariance
+    approximation to the same prefix log-determinant. ``l2`` is retained only
+    to reproduce historical v3.4 checkpoints; it is pointwise energy, not a
+    marginal coding rate.
     """
 
     def __init__(
@@ -30,8 +33,8 @@ class MarginalCodingRateSelector(nn.Module):
         mode: str = "exact",
     ) -> None:
         super().__init__()
-        if mode not in {"exact", "l2"}:
-            raise ValueError("coding-rate mode must be exact or l2")
+        if mode not in {"exact", "diag", "l2"}:
+            raise ValueError("coding-rate mode must be exact, diag, or l2")
         self.rate_dim = int(rate_dim)
         self.epsilon = float(epsilon)
         self.temperature = float(temperature)
@@ -42,7 +45,21 @@ class MarginalCodingRateSelector(nn.Module):
     def _marginal_rate(self, features: torch.Tensor) -> torch.Tensor:
         device_type = features.device.type
         with torch.amp.autocast(device_type=device_type, enabled=False):
-            z = self.proj(self.norm(features).float()).float()
+            normalized = self.norm(features).float()
+            if self.mode == "diag":
+                # Diagonal approximation of
+                # 0.5*logdet(I + alpha*sum_i z_i z_i^T). Unlike the historical
+                # pointwise L2 score, differencing prefix rates measures the
+                # incremental coding contribution at each position and remains
+                # fully parallel through cumsum.
+                prefix_energy = normalized.square().cumsum(dim=1)
+                alpha = 1.0 / (self.epsilon**2)
+                prefix_rate = 0.5 * torch.log1p(alpha * prefix_energy).mean(dim=-1)
+                previous = torch.cat(
+                    [torch.zeros_like(prefix_rate[:, :1]), prefix_rate[:, :-1]], dim=1
+                )
+                return prefix_rate - previous
+            z = self.proj(normalized).float()
             if self.mode == "l2":
                 return 0.5 * torch.log1p(z.square().sum(dim=-1) / (self.epsilon**2))
             outer = z.unsqueeze(-1) * z.unsqueeze(-2)
@@ -54,6 +71,10 @@ class MarginalCodingRateSelector(nn.Module):
             rate = 0.5 * torch.where(sign > 0, logabsdet, torch.zeros_like(logabsdet))
             previous = torch.cat([torch.zeros_like(rate[:, :1]), rate[:, :-1]], dim=1)
             return rate - previous
+
+    def marginal_rate(self, features: torch.Tensor) -> torch.Tensor:
+        """Return per-position scores without applying a chunk budget."""
+        return self._marginal_rate(features)
 
     def forward(
         self,
