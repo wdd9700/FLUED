@@ -1,5 +1,7 @@
 # FLUED v3.4
 
+- [`FLUED_V3_4_ARCHITECTURE_GRADIENT_DECISION_TRACE_CN.md`](FLUED_V3_4_ARCHITECTURE_GRADIENT_DECISION_TRACE_CN.md)：v0.4-v3.4 架构谱系、当前数据流、梯度路由、位置/小 AR 决策和关键代码索引。
+
 当前实证状态：固定置信度阈值边界、readout 级补全、RoPE/ALiBi + 小 AR、普通 byte lookup
 和硬 readout emit 已获得修正版实验支持。2026-07-16 长程归因进一步表明：hard emit 在动态边界
 接管前已造成容量坍缩，边界接管随后带来第二次梯度冲击；单纯延长到 40K 或缩短过渡无法恢复。
