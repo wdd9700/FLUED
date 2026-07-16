@@ -4,6 +4,35 @@
 >
 > 代码锚点以当前分支 `copilot/implement-stage-a-experiments` 为准；早期数值均保留证据等级，不能跨口径外推。
 
+## 0. 研究谱系、CTM-OCR 反例与 H-Net 对照
+
+FLUED 的问题定义并非宣称从零出现，而是在独立工程迭代中持续吸收可验证的外部思想。应严格区分三件事：**借鉴某个观察视角**、**出现高层结构同构**、以及**已经实证优于该工作**。前两者是设计事实；最后一项仍需要 FLUED 自身的同预算、长程比较。
+
+| 时间 / 版本 | 外部工作 | 可复用的观察视角 | FLUED 的吸收与边界 |
+| --- | --- | --- | --- |
+| 最初问题定义 | [ELF](https://arxiv.org/abs/2605.10938) | 在连续表示空间中处理语言，而非过早把语言冻结为离散词表选择 | 形成“byte 流到连续 latent 再回 byte”的 codec 问题；FLUED 保留显式可逆 decoder，并非 ELF 的复现 |
+| v3.1 | [BLT](https://arxiv.org/abs/2412.09871)、[ByteFlow](https://arxiv.org/abs/2603.03583) | 局部 byte 表征、压缩后的全局处理，以及以编码率讨论边界 / 计算分配 | 明确 segment、readout、memory 的职责；把 coding-rate 作为边界结构信号。历史全局 readout 分散度实现曾错位，当前 L2 仅是待验证代理 |
+| v3.3 | [DiffusionGemma](https://deepmind.google/models/gemma/diffusiongemma/) | 双向、并行的块级细化可以承担非自回归表征 | 采用 one-shot DiT-style refinement；不声称复现其多步生成、采样效率或训练规模 |
+| v3.3-v3.4 | [H-Net](https://arxiv.org/abs/2507.07955) | 高分辨率局部编码、动态压缩、低分辨率主网络、再解码的层级路线 | 独立迭代中出现高层同构后，公开对照并吸收其层级视角；FLUED 仍以可替换 backbone 的 byte codec、严格 mask、无 self-memory 和共享近似逆为可消融差异 |
+
+```mermaid
+flowchart LR
+    subgraph HN[H-Net 高层参考结构]
+      H1[raw bytes] --> H2[local encoder] --> H3[dynamic chunking]
+      H3 --> H4[compressed main network] --> H5[upsample + decoder] --> H6[next-byte logits]
+    end
+    subgraph FL[FLUED v3.4 codec 变体]
+      F1[masked bytes] --> F2[DiT segmentor] --> F3[hard chunk + soft bridge]
+      F3 --> F4[interpreter + emit readout] --> F5[replaceable backbone] --> F6[shared inverse byte decoder]
+      F3 -. parallel internal context .-> FM[no-self memory]
+      FM --> F4
+    end
+```
+
+两者都从“高分辨率 byte 局部处理 -> 学习压缩 -> 低分辨率主处理 -> byte 解码”出发；但 FLUED 当前研究的问题更窄：它是否能提供一个**对外可替换、对内可还原**的语言编码接口。memory 不开放给外部 backbone，decoder 也不读取 memory，以避免用旁路捷径替代 codec 本身的可检验性。H-Net 的长程、规模化结论不能转移到 FLUED；v3.4 的消融正是在验证这些差异是否值得保留。
+
+CTM-OCR 提供了这条路线的工程反例：其缩放后的 25M FLUED Stage A 在纯 byte 重建上达到近零损失、`m/n=0.3000`，但冻结 decoder 的 OCR Stage B 出现重复的平均 byte 模式坍缩。项目因此改以 direct-only OCR 建立可信基线，并把 FLUED / latent 辅助项暂置为 `0.0`。这不是 FLUED 与 OCR 的公平性能对比，而是促使 v2 放弃恒等重建、v3 以严格 masked-source 补全评估 latent 质量的直接工程触发。
+
 ## 1. 版本演化不是堆组件
 
 ```mermaid
@@ -20,6 +49,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | v0.4 | 研究 byte 流能否被连续潜表示精确翻译 | 建立自编码与压缩实验计划 | 仅为问题定义，不含性能 claim |
 | v1 | 软边界与 tied inverse 足以形成可逆 codec | 纯重建 E1；历史 E2/E3 | 可高保真还原；历史 E3 不可替代后续公平 BPB |
+| CTM-OCR 触发 | 将 25M v0.4 风格 FLUED 用作 OCR decoder / latent target | Stage B latent 接口日志与 direct-only 主线 | 近零重建不等于视觉主干容易产生可解码 latent；是 v2 去噪与 v3 语义质量评估的工程触发，不是后续横比基准 |
 | v2 | 加去噪可避免恒等映射，边界可由类型先验启动 | 3 seeds、去噪/压缩扫描、D1 | 重建稳定；去噪会削弱压缩；公平 D1 仍落后 BPE |
 | v3.1 | readout 是外部语义接口，memory 是内部摘要 | ROI、轻量 codec、早期 backbone probe | 发现潜表示可能帮助补全，但边界仍偏符号/容量 |
 | v3.2.1 | 先在原始 byte mask，才可评估下游帮助 | strict masked-source | no-memory latent 0.1898 vs byte 0.1440；阻断 clean 编码泄漏 |
