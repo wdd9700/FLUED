@@ -1,0 +1,37 @@
+{
+  "matrix_name": "v34_memory_order_variants_20k",
+  "base_matrix": "configs/v3_4/v34_memory_usage_supervision_20k.json",
+  "base": {
+    "memory_usage_loss_weight": 0.05
+  },
+  "experiments": [
+    {
+      "id": "mo_control_no_memory",
+      "overrides": {
+        "use_memory": false,
+        "memory_usage_loss_weight": 0.0
+      }
+    },
+    {
+      "id": "mo_set_nopos_w005",
+      "overrides": {
+        "memory_use_position": false,
+        "memory_position_mode": "none"
+      }
+    },
+    {
+      "id": "mo_chunk_rope_w005",
+      "overrides": {
+        "memory_use_position": true,
+        "memory_position_mode": "chunk_rope"
+      }
+    },
+    {
+      "id": "mo_byte_alibi_w005",
+      "overrides": {
+        "memory_use_position": true,
+        "memory_position_mode": "byte_alibi"
+      }
+    }
+  ]
+}
