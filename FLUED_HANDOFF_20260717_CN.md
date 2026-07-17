@@ -591,6 +591,8 @@ CBIU 进入 dynamic boundary 前，至少要求多种子结果满足：
 
 当前最佳 `0.240 / 0.584 / 0.149 / 0.603`，未通过。
 
+**2026-07-17 晚多种子复核（3 train seeds × 3 mask seeds，MLP-64）**：CBIU dual 均值 `0.184 / 0.546 / 0.166 / 0.594`，legacy 均值 `0.137 / 0.497 / 0.176 / 0.512`；18/18 cell 无一过线，但 9/9 配对 cell 上 CBIU 全部优于 legacy。结论：信号弱而真实、跨种子稳定、控制器容量不是瓶颈；下一步改动作特征与标签方差估计，boundary 接管无限期搁置。详见 followup 报告实验 B。
+
 ### 7.5 Runtime
 
 RTX 5080，batch=8，seq_len=512：
@@ -769,7 +771,8 @@ E:\projects\FLUED\FLUED\
 6. `FLUED_V3_4_CORE_CORRECTION_AND_RERUN_20260714_CN.md`；
 7. `FLUED_V3_4_ATTRIBUTION_MATRICES_RESULTS_20260716_CN.md`；
 8. `FLUED_V3_4_CBIU_DESIGN_AND_VALIDATION_PLAN_20260716_CN.md`；
-9. `FLUED_V3_4_CBIU_THREE_ROUND_RESULTS_20260717_CN.md`。
+9. `FLUED_V3_4_CBIU_THREE_ROUND_RESULTS_20260717_CN.md`；
+10. `FLUED_V3_4_FOLLOWUP_EXPERIMENTS_20260717_CN.md`（decoder 解耦、CBIU 多种子、emit 容量课程三组后续实验）。
 
 早于 2026-07-14 的 v3.4 报告仍有研究价值，但可能描述被后续修复的实现，必须和 correction/self-audit 一起阅读。
 
@@ -1007,7 +1010,7 @@ tools/train/v3_4/cbiu.py
 1. **Boundary 信用分配仍非平稳**：均匀预热期梯度弱，动态接管时 Segmentor 梯度突增；且 07-16 矩阵确认 hard emit 在边界切换前已先行压垮容量，两阶段故障必须分别处理。
 2. **CBIU 校准不足**：已有弱信号，但未达到 boundary 准入线。
 3. **Memory 因果价值未闭环**：使用率、注意力比例和内容贡献仍混在一起；当前 memory 是无位置集合，gate 监督不等于内容依赖。
-4. **Decoder 共享逆同预算大幅落后**：同预算 20K 重建 21.00% vs 独立 40.92%，函数形态未失效但联合优化互相拖拽，是当前最大 blocker。
+4. **Decoder 共享逆同预算大幅落后**：同预算 20K 重建 21.00% vs 独立 40.92%，函数形态未失效但联合优化互相拖拽，是当前最大 blocker。2026-07-17 晚复核实验进一步证伪预热/交替/梯度缩放三种廉价解耦（见 followup 报告实验 A），decoder 路线需要结构性决策。
 5. **主任务之间竞争**：重建倾向保留细节，补全倾向平滑抽象，压缩倾向减少容量。
 6. **语义自然度未直接优化**：编码率和任务收益不自动等于语言学边界。
 7. **动态 chunk 数未完全实现为批次级率失真约束**：固定预算/阈值仍可能产生捷径。
@@ -1036,12 +1039,19 @@ tools/train/v3_4/cbiu.py
 
 ## 15. 下一步建议与严格决策链
 
-### 15.1 P0：Decoder 解耦与 CBIU emit 的可信验证
+### 15.1 P0：Decoder 路线决策与 CBIU emit 的可信验证
 
-**2026-07-17 复核修订**：共享逆 decoder 是当前最大 blocker，且 CBIU 效用标签建立在共享逆路径上，decoder 噪声会直接污染动作标签。因此先做 decoder 解耦，再做 CBIU 多种子：
+**2026-07-17 晚复核实验更新**（详见 `docs/versions/v3.4/FLUED_V3_4_FOLLOWUP_EXPERIMENTS_20260717_CN.md`）：
 
-0. Decoder 解耦对照（共享逆 baseline / 预热后解冻 / 交替更新 / 梯度缩放 / 独立 decoder 参照），同预算比较重建、补全、actual latent 与边界稳定性；
-1. MLP-64，至少 3 train seeds x 3 mask seeds；
+- decoder 预热/交替/梯度缩放三种廉价解耦已证伪（实验 A），decoder 需要结构性决策（独立 decoder / 共享初始化+独立参数 / 分阶段交替）；
+- CBIU MLP-64 多种子未过准入线，但稳定优于 legacy（实验 B）；下一轮改动作特征与标签方差估计；
+- emit 容量阶跃 warmup 已证伪（实验 C），坍缩由 hard emit 容量阶跃直接造成，必须实现连续预算退火。
+
+更新后的执行顺序：
+
+0. Decoder 路线结构性决策（禁止扩 300M 维持不变）；
+0.5. emit 连续预算退火旋钮（`emit_budget_curriculum`），在 uniform 全容量预热上做 3K-8K 渐减；
+1. MLP-64 新动作特征/标签，至少 3 train seeds x 3 mask seeds；
 2. 同一 frozen FLUED、同一 latent budget，训练 fresh backbone；
 3. 比较 Legacy、CBIU quality、CBIU dual；
 4. 报告校准、三风险 BPB、actual latent、收敛曲线；

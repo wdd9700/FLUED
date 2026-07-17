@@ -1101,7 +1101,7 @@ class FLUEDV34Probe(nn.Module):
             flat = block(flat, flat_valid, local_noise)
         readout_candidates = flat.reshape_as(readout)
         emit = self.emit_controller(readout_candidates, chunks.chunk_mask)
-        if c.use_emit_controller:
+        if c.use_emit_controller and not getattr(self, "emit_warmup_active", False):
             if c.emit_forward_mode == "hard_st":
                 readout = readout_candidates * emit.straight_through.unsqueeze(-1).to(readout_candidates.dtype)
             elif c.emit_forward_mode == "soft":

@@ -1104,10 +1104,20 @@ def step_model(
         + punctuation_weight * boundary_components["punctuation"]
         + neutral_weight * boundary_components["neutral_mean"]
     )
+    identity_scale = float(args.decoder_loss_scale)
+    completion_scale = 1.0
+    if model.training and global_step >= 0 and args.training_scope != "emit_only":
+        if args.decoder_warmup_steps > 0 and global_step < args.decoder_warmup_steps:
+            completion_scale = 0.0
+        elif args.decoder_alternating_period > 0:
+            if (global_step // args.decoder_alternating_period) % 2 == 0:
+                completion_scale = 0.0
+            else:
+                identity_scale = 0.0
     loss = (
-        args.identity_loss_weight * identity_loss
-        + args.completion_loss_weight * masked_loss
-        + args.preserve_loss_weight * preserve_loss
+        identity_scale * args.identity_loss_weight * identity_loss
+        + completion_scale * args.completion_loss_weight * masked_loss
+        + completion_scale * args.preserve_loss_weight * preserve_loss
         + weighted_boundary_prior
         + args.boundary_rate_alignment_weight * boundary_rate_loss
         + args.boundary_rate_calibration_weight * boundary_calibration_loss
@@ -1153,6 +1163,9 @@ def step_model(
             "identity_loss": float(identity_loss.item()),
             "completion_masked_loss": float(masked_loss.item()),
             "completion_preserve_loss": float(preserve_loss.item()),
+            "identity_weight_effective": float(identity_scale * args.identity_loss_weight),
+            "completion_weight_effective": float(completion_scale * args.completion_loss_weight),
+            "emit_warmup_active": float(bool(getattr(model, "emit_warmup_active", False))),
             "identity_acc": _safe_acc(identity_pred, identity_targets, slot_mask),
             "identity_mask_is_mask_acc": _safe_acc(identity_pred, identity_targets, masked_slot),
             "completion_mask_acc": _safe_acc(completed_pred, clean_targets, masked_slot),
@@ -1311,6 +1324,8 @@ def order_probe(model: FLUEDV34, seq_len: int, device: torch.device) -> Dict[str
 def evaluate(model, backbone, loader, args, device, cbiu_state: CBIUState | None = None) -> Dict[str, float]:
     model.eval()
     backbone.eval()
+    previous_emit_warmup = getattr(model, "emit_warmup_active", False)
+    model.emit_warmup_active = False
     rows: List[Dict[str, float]] = []
     fork_devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
     with torch.random.fork_rng(devices=fork_devices):
@@ -1335,6 +1350,7 @@ def evaluate(model, backbone, loader, args, device, cbiu_state: CBIUState | None
             rows.append(metrics)
     result = _avg_metrics(rows)
     result.update(order_probe(model, args.seq_len, device))
+    model.emit_warmup_active = previous_emit_warmup
     model.train()
     backbone.train()
     return result
@@ -1501,6 +1517,9 @@ def run(args: argparse.Namespace) -> dict:
             flush=True,
         )
     for step in range(start_step, args.max_steps):
+        model.emit_warmup_active = bool(
+            args.use_emit_controller and args.emit_warmup_steps > 0 and step < args.emit_warmup_steps
+        )
         if apply_boundary_curriculum(model, args, step):
             print(
                 f"[boundary-curriculum] switch at step={step}: "
@@ -1699,6 +1718,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-emit-controller", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--emit-forward-mode", choices=["hard_st", "soft"], default="hard_st")
     parser.add_argument("--emit-initial-probability", type=float, default=0.1)
+    parser.add_argument("--emit-warmup-steps", type=int, default=0)
     parser.add_argument("--emit-threshold", type=float, default=0.5)
     parser.add_argument("--emit-controller-hidden", type=int, default=0)
     parser.add_argument("--emit-controller-slot-embedding", action=argparse.BooleanOptionalAction, default=False)
@@ -1727,6 +1747,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--identity-loss-weight", type=float, default=1.0)
     parser.add_argument("--completion-loss-weight", type=float, default=2.0)
     parser.add_argument("--preserve-loss-weight", type=float, default=0.5)
+    parser.add_argument("--decoder-warmup-steps", type=int, default=0)
+    parser.add_argument("--decoder-alternating-period", type=int, default=0)
+    parser.add_argument("--decoder-loss-scale", type=float, default=1.0)
     parser.add_argument("--boundary-loss-weight", type=float, default=0.02)
     parser.add_argument("--boundary-continuation-loss-weight", type=float, default=None)
     parser.add_argument("--boundary-punctuation-loss-weight", type=float, default=None)

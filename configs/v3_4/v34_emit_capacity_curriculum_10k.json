@@ -1,0 +1,34 @@
+{
+  "matrix_name": "v34_emit_capacity_curriculum_10k",
+  "base_file": "configs/v3_4/v34_default_38m_20k.json",
+  "base": {
+    "data_path": "E:\\projects\\SoulMamba\\soulvlm_project\\temp\\corpus_v3.txt",
+    "max_steps": 10000,
+    "max_eval_batches": 32,
+    "use_memory": false,
+    "use_structured_lookup": false,
+    "boundary_coding_rate_mode": "diag",
+    "boundary_curriculum_coding_rate_mode": "diag",
+    "checkpoint_every": 1000,
+    "milestone_every": 1000,
+    "resume": true
+  },
+  "experiments": [
+    {
+      "id": "f0_baseline_10k",
+      "overrides": {}
+    },
+    {
+      "id": "f1_emit_warmup_3k",
+      "overrides": {
+        "emit_warmup_steps": 3000
+      }
+    },
+    {
+      "id": "f2_emit_warmup_5k",
+      "overrides": {
+        "emit_warmup_steps": 5000
+      }
+    }
+  ]
+}

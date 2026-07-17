@@ -1,0 +1,73 @@
+{
+  "matrix_name": "v34_cbiu_multiseed_emit_only_3k",
+  "base_matrix": "configs/v3_4/v34_cbiu_round3_controller_capacity_3k.json",
+  "base": {
+    "emit_controller_hidden": 64,
+    "emit_controller_slot_embedding": false
+  },
+  "experiments": [
+    {
+      "id": "r4_cbiu_dual_mlp64_s042",
+      "overrides": {
+        "seed": 42,
+        "eval_mask_seed": 1042,
+        "emit_target_mode": "cbiu",
+        "cbiu_compute_budget": 0.18,
+        "cbiu_dual_lr": 0.001,
+        "cbiu_dual_max": 10.0,
+        "cbiu_augmented_weight": 0.2,
+        "cbiu_utility_temperature": 0.25
+      }
+    },
+    {
+      "id": "r4_cbiu_dual_mlp64_s123",
+      "overrides": {
+        "seed": 123,
+        "eval_mask_seed": 1042,
+        "emit_target_mode": "cbiu",
+        "cbiu_compute_budget": 0.18,
+        "cbiu_dual_lr": 0.001,
+        "cbiu_dual_max": 10.0,
+        "cbiu_augmented_weight": 0.2,
+        "cbiu_utility_temperature": 0.25
+      }
+    },
+    {
+      "id": "r4_cbiu_dual_mlp64_s999",
+      "overrides": {
+        "seed": 999,
+        "eval_mask_seed": 1042,
+        "emit_target_mode": "cbiu",
+        "cbiu_compute_budget": 0.18,
+        "cbiu_dual_lr": 0.001,
+        "cbiu_dual_max": 10.0,
+        "cbiu_augmented_weight": 0.2,
+        "cbiu_utility_temperature": 0.25
+      }
+    },
+    {
+      "id": "r4_legacy_mlp64_s042",
+      "overrides": {
+        "seed": 42,
+        "eval_mask_seed": 1042,
+        "emit_target_mode": "legacy"
+      }
+    },
+    {
+      "id": "r4_legacy_mlp64_s123",
+      "overrides": {
+        "seed": 123,
+        "eval_mask_seed": 1042,
+        "emit_target_mode": "legacy"
+      }
+    },
+    {
+      "id": "r4_legacy_mlp64_s999",
+      "overrides": {
+        "seed": 999,
+        "eval_mask_seed": 1042,
+        "emit_target_mode": "legacy"
+      }
+    }
+  ]
+}

@@ -74,12 +74,15 @@ def main() -> None:
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--max-eval-batches", type=int, default=16)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--eval-mask-seed", type=int, default=-1)
     cli = parser.parse_args()
 
     checkpoint = Path(cli.checkpoint)
     config_path = Path(cli.config) if cli.config else checkpoint.with_name("resolved_config.json")
     config = json.loads(config_path.read_text(encoding="utf-8"))
     config.update(device=cli.device, max_eval_batches=cli.max_eval_batches, num_workers=0)
+    if cli.eval_mask_seed >= 0:
+        config["eval_mask_seed"] = cli.eval_mask_seed
     args = Namespace(**config)
     device = torch.device(cli.device if cli.device == "cpu" or torch.cuda.is_available() else "cpu")
     torch.manual_seed(args.seed)
@@ -168,6 +171,7 @@ def main() -> None:
         "checkpoint": str(checkpoint.resolve()),
         "config": str(config_path.resolve()),
         "anchor_file": str(Path(cli.anchor_file).resolve()),
+        "eval_mask_seed": int(args.eval_mask_seed),
         "examples": count,
         "positive_fraction": float(labels.float().mean().item()),
         "predicted_probability_mean": float(probability.mean().item()),
