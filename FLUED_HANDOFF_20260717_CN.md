@@ -5,6 +5,7 @@
 > 仓库：`E:\projects\FLUED\FLUED`  
 > 当前研究版本：FLUED v3.4  
 > 文档性质：研究现状、实现口径、实验结论、资产位置和后续决策的单一交接入口
+> 2026-07-17 复核修订：依据 07-15 迁移后总报告、07-16 归因矩阵与 CBIU V0，修订 lookup 默认值、decoder blocker 强度、两阶段故障机制、memory 位置/0.05 权重与 CBIU V0 结论（涉及 1.2/3.6/4.1/4.3/4.4/4.8/5.3/5.5/6/7.0/8.2/14.1/15）。
 
 ---
 
@@ -61,9 +62,9 @@ FLUED 不是要简单取代 tokenizer，也不只是把 tokenizer 包装成一�
 | 位置与顺序 | RoPE 是必要组件；小 AR 头不能替代位置编码，但与 RoPE 联合更合理。 |
 | Emit | 硬发声并真实 compact 才是计算门控；soft gate 只缩放表示，不降低 token 数。 |
 | Memory | 当前是并行逐 chunk 总结、interpreter 读取其他 chunk memory；其稳定收益尚未证明，仍是实验分支。 |
-| Decoder | 当前 shared inverse 是近似共享逆，不是数学上的严格权重反转；decoder 不读 memory。 |
+| Decoder | 当前 shared inverse 是近似共享逆，不是数学上的严格权重反转；decoder 不读 memory。同预算 0.20 latent/byte 下共享逆 21.00%/PPL 43.37，独立 decoder 40.92%/PPL 30.83，共享逆是当前最大 blocker，禁止直接扩 300M。 |
 | CBIU | 已验证能学习弱但非随机的 emit 动作价值，并减少实际 backbone latent；尚未达到接管动态 boundary 的校准门槛。 |
-| 当前最大风险 | 联合训练非平稳、边界课程梯度冲击、memory 内容因果性未证实、CBIU 校准不足、长上下文和大规模 scaling 未完成。 |
+| 当前最大风险 | 共享逆 decoder 同预算大幅落后、hard emit 课程前段容量坍缩、联合训练非平稳、边界课程梯度冲击、memory 内容因果性未证实、CBIU 校准不足、长上下文和大规模 scaling 未完成。 |
 
 ### 1.3 当前最强的公开证据
 
@@ -233,7 +234,7 @@ v3.4 的核心改动：
 1. 每个 chunk 的 memory 只由本 chunk byte 并行产生；
 2. 各 chunk memory 互不自回归依赖；
 3. interpreter one-shot 读取其他 chunk memory，屏蔽当前 chunk memory；
-4. 结构化 byte lookup、prompt/局部位置编码和小 AR 修正用于保留顺序；
+4. prompt/局部位置编码和小 AR 修正用于保留顺序（byte lookup 见 4.1 的口径修订）；
 5. 每 chunk 生成 1-16 个 readout 候选；
 6. fallback readout 永远发声，extra readout 由硬前向、连续反传控制器决定；
 7. backbone 只处理 compact 后真实发声的 latent；
@@ -283,7 +284,7 @@ flowchart TD
 - `PlainByteLookup`：传统离散 byte embedding；
 - `StructuredByteLookup`：把 256 个 byte 映射到 16x16 结构坐标，再投影为模型表示。
 
-当前 canonical v3.4 配置启用 structured lookup。它提供弱结构先验，但不把单个 byte 假装成独立语义单元。需要注意：最新 CBIU 三轮实验从一个 plain lookup 历史检查点续训，因此 CBIU 结果不能同时证明 structured lookup 的收益。
+**2026-07-17 复核修订**：structured lookup 的优势只来自 5K 结构消融（0.597 vs 0.436 identity）；07-15 修正版同预算 20K 实验中普通 lookup 反超（重建 26.06%/PPL 46.62 vs 21.50%/48.54），07-15 迁移后总报告已将默认改为**普通 byte lookup**。但 `configs/v3_4/v34_default_38m_20k.json` 仍为 `use_structured_lookup=true`，属于 canonical 配置与最新证据不一致的已知遗留（见 14.2），下一次正式训练前应显式决定。CBIU 三轮从 plain lookup 历史检查点续训，与该默认一致。
 
 ### 4.2 Segmentor
 
@@ -318,6 +319,8 @@ flowchart TD
 
 已定位的问题是：课程切换前 Segmentor 主任务梯度可能接近 0；动态接管后梯度会突然高于 readout/backbone 一个数量级。边界坍缩并非简单欠训练，而是信用分配突变。
 
+**2026-07-17 复核修订（07-16 归因矩阵，两阶段故障）**：坍缩不是单一事件。第一阶段发生在边界切换**之前**：hard emit 在 2.5K（uniform 边界，重建 81.13%、0.934 latent/byte）到 4.0K（仍为 uniform 边界，重建 21.00%、0.117 latent/byte）之间已把有效表达容量压垮；第二阶段才是 6K 动态边界接管后的 Segmentor 梯度冲击（原始梯度均值 1010、峰值 121391、211 次超过 1000）。40K 延长训练与 500 步短过渡均不能恢复，排除欠训练解释。结论是 hard emit 与动态边界是两个连续发生、必须分别处理的问题，建议课程拆为四条：codec 对齐 / emit 容量 / 边界前向 / 边界梯度（见 15.2 修订）。
+
 ### 4.4 Parallel Memory
 
 每个 chunk 的 memory：
@@ -335,6 +338,8 @@ flowchart TD
 - current-memory 相关分支：用于消融，不是默认可信结论。
 
 memory 可以采用 chunk-index RoPE 或基于原始 byte anchor 的双向 ALiBi。当前尚无充分证据证明哪种位置注入在长上下文中稳定占优。
+
+**2026-07-17 复核修订**：07-16 归因矩阵确认当前实际运行为 `memory_use_position=false`，即 memory cross-attention **没有任何位置编码，是无位置集合**。因此"样本内 chunk 换序不改变结果"是置换不变性的数学必然，不能用来否定 memory 语义；反过来，无序集合对有序事件/代码的建模能力存疑，byte-anchor 有序化是待验证分支。另有工程观察：memory summarizer 原始范数从 5K 的约 92 膨胀到 20K 的约 1850，被 LayerNorm 完全掩盖，长训练尺度稳定性未闭环。
 
 必须区分三件事：
 
@@ -397,6 +402,8 @@ CBIU 第三轮后，MLP-64 是下一轮默认候选，但代码为了兼容旧�
 - 不是严格可证明的矩阵逆或完全 tied transpose；
 - 仍可能在联合训练中与 encoder 发生梯度竞争。
 
+**2026-07-17 复核修订**：07-15 迁移后总报告已将共享逆定性为**当前最大 blocker，禁止直接扩 300M**。同预算约 0.20 latent/byte 时：共享逆重建 21.00%/PPL 43.37，独立 decoder 重建 40.92%/PPL 30.83；独立 decoder 自身工作点达 48.08%/13.97% 补全/0.383 latent/byte。优势并非多发 latent 造成。冻结 readout 探针显示共享逆函数形态未失效（1K 可拟合至 56.28%），问题集中在联合训练非平稳；07-16 归因矩阵建议 decoder 预热、交替更新或梯度缩放，而不是继续全量同步反传。
+
 “shared inverse”必须在论文和文档中写成**近似共享逆**，不能声称严格反转。
 
 ### 4.9 外部 Backbone
@@ -455,6 +462,8 @@ CBIU 第三轮后，MLP-64 是下一轮默认候选，但代码为了兼容旧�
 
 曾经存在 `memory_usage_loss_weight=0.05` 的正信号，但它只能证明模型被迫使用 memory 后率失真可能变化，不能证明 memory 内容是语义摘要。当前 canonical 38M 配置将该权重设为 0，memory 继续作为待归因分支。
 
+**2026-07-17 复核修订**：07-16 归因矩阵（3×20K + 严格 no-memory 对照）给出更细结论：权重 0 时 PPL 恶化 0.876、重建下降 2.72pp；权重 0.02 时 PPL 改善 0.528 但 latent 增加 13.7%；**权重 0.05 是唯一推进率失真前沿的候选**（PPL 改善 0.809、actual latent 降低 6.4%、重建仅降 0.26pp），已被列为候选默认，no-memory 保留为每轮严格对照。该结论为单种子 20K，需多种子与 2048/4096 确认后才能升级为架构结论。
+
 后续如需比较 memory/readout 内容，应训练独立小翻译器或探针，分析实体、指代、变量名和主题信息，而不是直接比较向量维度或余弦相似度。
 
 ### 5.4 AR 信号
@@ -475,6 +484,8 @@ CBIU 第三轮后，MLP-64 是下一轮默认候选，但代码为了兼容旧�
 - 固定计算成本；
 
 共同构造。它的问题是动作标签受主体当前状态影响，概率校准接近随机，容易把高熵噪声或细节复制当作价值。
+
+**2026-07-17 复核修订（results 原始日志）**：20K 训练末期 `emit_value_mean` 退化到约 0（P4-B 终态约 -0.002，target 约 0.497），即 legacy 价值监督最终只学到均值基线、不再区分 slot 价值。这是 CBIU 替换 legacy target 的直接经验动机之一。
 
 ### 5.6 CBIU：统一效用信号
 
@@ -511,14 +522,14 @@ CBIU 当前只在线接入 emit。它还没有接管 boundary、memory 或小 AR
 | RoPE | 对顺序恢复是必要组件 | 位置/AR 四组消融 | 默认开启 |
 | 小 AR 单独使用 | 不能替代位置编码 | 四组消融 | 不单独使用 |
 | RoPE + 小 AR | 当前最佳结构组合方向 | 四组消融 | 保留，仍需长程确认 |
-| 16x16 structured lookup | 早期消融中明显优于普通 lookup | 5K 结构消融 | canonical 开启；CBIU 需重新验证 |
+| 16x16 structured lookup | 5K 消融优于 plain（0.597 vs 0.436 identity），但 07-15 修正版 20K 同预算被 plain 反超（26.06%/46.62 vs 21.50%/48.54） | 5K 结构消融 + 20K 修正版 | **当前默认 plain lookup**；canonical 配置尚未同步（见 8.2） |
 | Soft emit | 不减少实际 token，不是计算门控 | 直接实现与日志 | 淘汰为部署方案 |
-| Hard-ST emit | 可真实 compact backbone 输入 | 测试 + runtime probe | 保留 |
+| Hard-ST emit | 可真实 compact backbone 输入；但课程前段即造成容量坍缩（4.0K 重建 81%→21%，先于边界切换） | 测试 + runtime probe + 07-16 归因矩阵 | 保留；emit 容量课程必须与边界课程解耦 |
 | Emit value supervision | 关闭后重建显著下降 | 5K 消融 | 需要，但 legacy 标签需替换/校准 |
 | Memory | 可改善部分重建或率失真，但补全收益不稳定 | 多轮 5K/20K | 可选分支，不能强 claim |
 | Current-memory | 容易形成自循环捷径，早期快但后期平台低 | 20K 对比 | 非默认 |
 | Other-only memory | 更符合信息隔离，当前更安全 | 代码审计 + 20K | 研究默认 |
-| Decoder 近似共享逆 | 保持参数简洁，但联合优化不稳定 | 归因实验 | 保留实验，需交替/梯度缩放对照 |
+| Decoder 近似共享逆 | 同预算大幅落后独立 decoder（21.00%/43.37 vs 40.92%/30.83），函数形态未失效，问题在联合优化 | 07-15 同预算 20K + 冻结 readout 探针 | **当前最大 blocker**；预热/交替更新/梯度缩放对照，禁止直接扩 300M |
 | 去噪全程固定 | 短期损害重建，对补全可能有帮助 | 消融 | 应课程退火，不固定全程 |
 | 只做重建 | 不能自动产生主干友好 latent | v1、v3.4 codec-only | 明确淘汰 |
 
@@ -527,6 +538,15 @@ CBIU 当前只在线接入 emit。它还没有接管 boundary、memory 或小 AR
 ## 7. CBIU 三轮实验完整结论
 
 归档根目录：`K:\FLUED_archive\v34_cbiu_three_rounds_20260717`
+
+### 7.0 前置：V0 离线验证（2026-07-16，冻结 m2 20K 检查点）
+
+归档：`L:\FLUED_archive\v34_cbiu_v0_20260716`。在正式三轮之前，CBIU 先在冻结检查点上完成配对干预验证：
+
+- 三风险 rich/null 锚点在所有被测检查点上有效分离（rich rho=0.00、null=1.00、policy=0.40）；
+- **small AR 是最强正向组件**：总效应 +0.82，固定 emit 后直接效应 +0.73，no-memory 对照上 +1.22，证明其价值不是来自多开 readout 或 memory 替代；
+- **定位 memory→emit 容量中介混淆**：stale memory 总效应为 -0.17（表面改善），但它把 readout/byte 从 0.17 抬到 0.19；固定 emit 后 stale 变为 +0.01、zero/skip 为 +0.03。正确 memory 只有弱正直接效用，旧 memory on/off 结论混入了容量中介；
+- 槽位价值分化：slot 8/15 保留效用 +0.094/+0.123，slot 1/4/12 接近零；m2 上 Brier 0.2145、符号准确率 80%，但跨四检查点 pilot 符号准确率仅 20-60%，证明 legacy emit controller 未学会价值，CBIU 替换有必要性。
 
 ### 7.1 第一轮：联合训练 5K
 
@@ -627,7 +647,7 @@ CBIU 已证明真实主干输入缩短，但当前临时 backbone 仅占约 1.4 
 - Segmentor 5 层，Interpreter 3 层；
 - memory rank 4；
 - 每 chunk 16 个 readout 候选；
-- structured lookup；
+- structured lookup（**注意**：与 07-15 修正版结论不一致，plain lookup 才是最新默认，下次正式训练前应显式决定，见 4.1）；
 - prompt ALiBi + local RoPE；
 - small AR hidden 128；
 - other-only memory，LayerNorm，residual 0.1；
@@ -638,7 +658,7 @@ CBIU 已证明真实主干输入缩短，但当前临时 backbone 仅占约 1.4 
 - fused AdamW，lr 2e-4；
 - 约 38.3M FLUED + 4.78M 临时 backbone。
 
-注意：此配置仍用 legacy emit target。CBIU MLP-64 尚未经过多种子验证，不能悄悄覆盖 canonical。
+注意：此配置仍用 legacy emit target。CBIU MLP-64 尚未经过多种子验证，不能悄悄覆盖 canonical。同理，07-16 归因矩阵的 memory 使用率权重 0.05 候选默认也尚未进入此配置（当前为 0）。
 
 ### 8.3 333M/4096/50K 规划配置
 
@@ -984,10 +1004,10 @@ tools/train/v3_4/cbiu.py
 
 ### 14.1 设计问题
 
-1. **Boundary 信用分配仍非平稳**：均匀预热期梯度弱，动态接管时 Segmentor 梯度突增。
+1. **Boundary 信用分配仍非平稳**：均匀预热期梯度弱，动态接管时 Segmentor 梯度突增；且 07-16 矩阵确认 hard emit 在边界切换前已先行压垮容量，两阶段故障必须分别处理。
 2. **CBIU 校准不足**：已有弱信号，但未达到 boundary 准入线。
-3. **Memory 因果价值未闭环**：使用率、注意力比例和内容贡献仍混在一起。
-4. **Decoder 共享逆非严格**：参数简洁，但与 encoder 联合更新可能互相拖拽。
+3. **Memory 因果价值未闭环**：使用率、注意力比例和内容贡献仍混在一起；当前 memory 是无位置集合，gate 监督不等于内容依赖。
+4. **Decoder 共享逆同预算大幅落后**：同预算 20K 重建 21.00% vs 独立 40.92%，函数形态未失效但联合优化互相拖拽，是当前最大 blocker。
 5. **主任务之间竞争**：重建倾向保留细节，补全倾向平滑抽象，压缩倾向减少容量。
 6. **语义自然度未直接优化**：编码率和任务收益不自动等于语言学边界。
 7. **动态 chunk 数未完全实现为批次级率失真约束**：固定预算/阈值仍可能产生捷径。
@@ -1016,8 +1036,11 @@ tools/train/v3_4/cbiu.py
 
 ## 15. 下一步建议与严格决策链
 
-### 15.1 P0：完成 CBIU emit 的可信验证
+### 15.1 P0：Decoder 解耦与 CBIU emit 的可信验证
 
+**2026-07-17 复核修订**：共享逆 decoder 是当前最大 blocker，且 CBIU 效用标签建立在共享逆路径上，decoder 噪声会直接污染动作标签。因此先做 decoder 解耦，再做 CBIU 多种子：
+
+0. Decoder 解耦对照（共享逆 baseline / 预热后解冻 / 交替更新 / 梯度缩放 / 独立 decoder 参照），同预算比较重建、补全、actual latent 与边界稳定性；
 1. MLP-64，至少 3 train seeds x 3 mask seeds；
 2. 同一 frozen FLUED、同一 latent budget，训练 fresh backbone；
 3. 比较 Legacy、CBIU quality、CBIU dual；

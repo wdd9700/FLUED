@@ -37,13 +37,21 @@ Current defensible claims:
 4. v3.2.1 strict masked-source training is the first FLUED v3-family result that
    clearly makes a small latent backbone outperform a byte baseline.
 5. v3.4 implements parallel per-chunk memory, marginal coding-rate boundary
-   selection, structured byte lookup, and hard readout emission with real
-   backbone compaction.
+   selection, plain byte lookup (structured lookup lost the corrected 20K
+   same-budget comparison), and hard readout emission with real backbone
+   compaction.
 6. In a corrected 38M / 20K single-seed probe, normalized historical
    other-chunk memory reaches `96.89%` reconstruction and `35.76` masked-byte
    completion perplexity at `0.58` actual latent/byte. In the fixed-mask
    threshold scan, it also outperforms no-memory at the matched `0.58-0.59`
    latent/byte point. This is not a scaling claim.
+7. CBIU (counterfactual byte-interface utility) shows a learnable but weak
+   emit-action value signal: the MLP-64 controller reaches `AUC=0.584`,
+   `Spearman=0.240`, `ECE=0.149` with about 40% fewer actual latents than the
+   legacy target. It does not yet pass the boundary-takeover admission bar.
+   The shared approximate-inverse decoder remains the largest blocker: at a
+   matched `0.20` latent/byte budget it reaches `21.00%` reconstruction /
+   `43.37` PPL versus `40.92%` / `30.83` for an independent decoder.
 
 Non-claims:
 
@@ -65,7 +73,7 @@ Non-claims:
 | v3.2 | Factorized byte seed, memory-free boundary, memory-conditioned interpreter, causal memory branch | The architecture boundary became clearer, but memory did not show universal gain. |
 | v3.2.1 | Strict masked-source codec and paired backbone evaluation | Masked-source training produced the strongest validated latent-interface result. |
 | v3.3 | Byte-to-latent decision interface | Current architecture target for public documentation and future implementation. |
-| v3.4 | Parallel memory, marginal coding rate, position/AR probes, hard emit control | Corrected 20K tests favor normalized no-self historical memory; current-memory helps early but plateaus lower. |
+| v3.4 | Parallel memory, marginal coding rate, position/AR probes, hard emit control | Corrected 20K tests favor normalized no-self historical memory; current-memory helps early but plateaus lower. 2026-07-16 attribution matrices: hard emit collapses capacity before the boundary switch; memory usage weight 0.05 is the first rate-distortion improvement. 2026-07-17 CBIU three rounds: learnable emit-action utility, not yet calibrated enough for boundary takeover. |
 
 See [docs/research/FLUED_RESEARCH_RETROSPECTIVE_CN.md](docs/research/FLUED_RESEARCH_RETROSPECTIVE_CN.md)
 for the full v1-v3.3 narrative; v3.4 evidence is indexed separately below.
@@ -148,7 +156,7 @@ construction off the serial critical path:
 
 ```mermaid
 flowchart TD
-    A["Byte IDs"] --> B["Structured 16x16 Byte Lookup"]
+    A["Byte IDs"] --> B["Plain Byte Lookup"]
     B --> C["Contextual Signed Segmentor"]
     C --> D["Hard Chunk Policy / Soft Gradient"]
     D --> E["Chunk-local Byte States"]
@@ -174,9 +182,16 @@ Main principles:
    backbone; the fallback readout is always retained.
 5. The decoder reverses byte-to-readout translation and does not consume memory.
 
-See the [v3.4 implementation baseline](docs/versions/v3.4/FLUED_V3_4_IMPLEMENTATION_BASELINE_CN.md),
-[5K historical ablation](docs/versions/v3.4/FLUED_V3_4_5K_ABLATION_ANALYSIS_20260711_CN.md),
-and [current 20K memory/position analysis](docs/versions/v3.4/FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md).
+See the [v3.4 documentation index](docs/versions/v3.4/README.md) for the full
+reading order. Current highest-priority entries:
+
+- [CBIU three-round results](docs/versions/v3.4/FLUED_V3_4_CBIU_THREE_ROUND_RESULTS_20260717_CN.md) (2026-07-17)
+- [Attribution matrices](docs/versions/v3.4/FLUED_V3_4_ATTRIBUTION_MATRICES_RESULTS_20260716_CN.md) (2026-07-16)
+- [Post-migration experiment report](docs/versions/v3.4/FLUED_V3_4_POST_MIGRATION_EXPERIMENTS_20260715_CN.md) (2026-07-15)
+
+Documents dated before 2026-07-14 describe pre-correction implementations
+(fixed Top-K boundary bypass, energy-proxy `l2`, independent decoder skeleton)
+and must be read together with the self-audit and correction reports.
 
 ### v3.4 5K Structural Screen
 
@@ -214,9 +229,10 @@ all 21 checkpoint-threshold evaluations are under
 | --- | --- |
 | [Documentation index](docs/README.md) | Versioned map and evidence status |
 | [Research retrospective](docs/research/FLUED_RESEARCH_RETROSPECTIVE_CN.md) | v1-v3.3 reasoning, failures, and iteration process |
-| [v3.4 implementation](docs/versions/v3.4/FLUED_V3_4_IMPLEMENTATION_BASELINE_CN.md) | Current executable architecture |
-| [v3.4 5K analysis](docs/versions/v3.4/FLUED_V3_4_5K_ABLATION_ANALYSIS_20260711_CN.md) | Frozen short-run structural evidence |
-| [v3.4 20K memory/position analysis](docs/versions/v3.4/FLUED_V3_4_MEMORY_POSITION_20K_ANALYSIS_20260713_CN.md) | Current canonical v3.4 decision and evidence |
+| [v3.4 doc index](docs/versions/v3.4/README.md) | Current v3.4 reading order and evidence status |
+| [CBIU three-round results](docs/versions/v3.4/FLUED_V3_4_CBIU_THREE_ROUND_RESULTS_20260717_CN.md) | Latest emit-utility evidence and admission bar |
+| [v3.4 attribution matrices](docs/versions/v3.4/FLUED_V3_4_ATTRIBUTION_MATRICES_RESULTS_20260716_CN.md) | Two-stage failure, memory usage weights, interventions |
+| [v3.4 post-migration report](docs/versions/v3.4/FLUED_V3_4_POST_MIGRATION_EXPERIMENTS_20260715_CN.md) | Corrected 20K defaults (plain lookup, decoder, memory) |
 | [v3-family checkpoint audit](docs/research/evidence/v3-family/FLUED_V3_FULL_METRIC_TABLE_REEVALUATION_CN.md) | Strict historical checkpoint re-evaluation |
 | [v2 rebuild](docs/versions/v2/FLUED_REBUILD.md) | v2 semantic rebuild notes |
 
