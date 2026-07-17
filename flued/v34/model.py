@@ -604,6 +604,8 @@ class FLUEDV34ProbeConfig:
     emit_forward_mode: str = "hard_st"
     emit_initial_probability: float = 0.1
     emit_threshold: float = 0.5
+    emit_controller_hidden: int = 0
+    emit_controller_slot_embedding: bool = False
     max_chunks: int = 40
     max_span: int = 128
     tau_cut: float = 0.9
@@ -735,7 +737,14 @@ class FLUEDV34Probe(nn.Module):
             c.coding_rate_temperature,
             c.coding_rate_mode,
         )
-        self.emit_controller = ReadoutEmitController(c.d_model, c.emit_initial_probability, c.emit_threshold)
+        self.emit_controller = ReadoutEmitController(
+            c.d_model,
+            c.emit_initial_probability,
+            c.emit_threshold,
+            hidden_dim=c.emit_controller_hidden,
+            max_readouts=c.readout_vectors,
+            use_slot_embedding=c.emit_controller_slot_embedding,
+        )
 
     @staticmethod
     def _scale_to_logit(initial: float, maximum: float) -> float:

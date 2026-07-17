@@ -148,20 +148,64 @@ class EmitDecision:
 class ReadoutEmitController(nn.Module):
     """One fallback readout plus value-gated optional readouts."""
 
-    def __init__(self, dim: int, initial_extra_probability: float = 0.1, threshold: float = 0.5) -> None:
+    def __init__(
+        self,
+        dim: int,
+        initial_extra_probability: float = 0.1,
+        threshold: float = 0.5,
+        hidden_dim: int = 0,
+        max_readouts: int = 16,
+        use_slot_embedding: bool = False,
+    ) -> None:
         super().__init__()
         self.norm = nn.LayerNorm(dim)
-        self.head = nn.Linear(dim, 1)
+        self.hidden_dim = int(hidden_dim)
+        self.slot_embedding = (
+            nn.Embedding(int(max_readouts), dim) if use_slot_embedding else None
+        )
+        if self.hidden_dim > 0:
+            self.head = nn.Sequential(
+                nn.Linear(dim, self.hidden_dim),
+                nn.SiLU(),
+                nn.Linear(self.hidden_dim, 1),
+            )
+        else:
+            self.head = nn.Linear(dim, 1)
         self.threshold = float(threshold)
-        probability = min(max(float(initial_extra_probability), 1.0e-4), 1.0 - 1.0e-4)
+        self.initial_extra_probability = float(initial_extra_probability)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        if self.slot_embedding is not None:
+            nn.init.zeros_(self.slot_embedding.weight)
+        probability = min(max(self.initial_extra_probability, 1.0e-4), 1.0 - 1.0e-4)
         bias = torch.logit(torch.tensor(probability)).item()
-        nn.init.zeros_(self.head.weight)
-        nn.init.constant_(self.head.bias, bias)
+        if self.hidden_dim > 0:
+            first = self.head[0]
+            final = self.head[-1]
+            first.reset_parameters()
+            nn.init.normal_(final.weight, mean=0.0, std=0.02)
+            nn.init.constant_(final.bias, bias)
+        else:
+            nn.init.zeros_(self.head.weight)
+            nn.init.constant_(self.head.bias, bias)
 
     def forward(self, candidates: torch.Tensor, chunk_mask: torch.Tensor) -> EmitDecision:
         # Controller losses specialize the controller rather than distorting a
         # candidate representation merely to change its emit score.
-        logits = self.head(self.norm(candidates.detach())).squeeze(-1)
+        controller_input = candidates.detach()
+        if self.slot_embedding is not None:
+            slot_ids = torch.arange(
+                controller_input.size(-2),
+                device=controller_input.device,
+            )
+            controller_input = controller_input + self.slot_embedding(slot_ids).view(
+                1,
+                1,
+                controller_input.size(-2),
+                controller_input.size(-1),
+            )
+        logits = self.head(self.norm(controller_input)).squeeze(-1)
         soft = torch.sigmoid(logits) * chunk_mask.unsqueeze(-1).to(logits.dtype)
         hard = soft.ge(self.threshold) & chunk_mask.unsqueeze(-1)
         if hard.size(-1):

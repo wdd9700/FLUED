@@ -1,0 +1,89 @@
+{
+  "matrix_name": "v34_cbiu_round1_emit_5k",
+  "base_file": "configs/v3_4/v34_default_38m_20k.json",
+  "base": {
+    "init_checkpoint": "L:\\FLUED_archive\\v34_attribution_matrices_20260716\\memory_usage_20k\\m2_gate_usage_supervision_w005\\latest.pt",
+    "cbiu_anchor_file": "L:\\FLUED_archive\\v34_cbiu_v0_20260716\\m2_16batch_fixed_emit\\cbiu_v0.json",
+    "cbiu_require_anchor_checkpoint_match": true,
+    "data_path": "E:\\projects\\SoulMamba\\soulvlm_project\\temp\\corpus_v3.txt",
+    "max_steps": 5000,
+    "max_eval_batches": 16,
+    "batch_size": 8,
+    "num_workers": 0,
+    "seed": 42,
+    "eval_mask_seed": 1042,
+    "deterministic": true,
+    "max_chunks": 64,
+    "readout_vectors": 16,
+    "use_structured_lookup": false,
+    "use_position": true,
+    "position_strategy": "layered_rope",
+    "prompt_position_scale": 0.0,
+    "use_prompt_alibi": true,
+    "use_ar": true,
+    "use_memory": true,
+    "memory_use_position": false,
+    "memory_position_mode": "chunk_rope",
+    "memory_residual_scale": 0.1,
+    "memory_context_norm": "layernorm",
+    "memory_access_mode": "other_only",
+    "current_memory_mode": "off",
+    "memory_usage_loss_weight": 0.05,
+    "boundary_mode": "confidence_threshold",
+    "boundary_coding_rate_mode": "diag",
+    "boundary_curriculum_switch_step": 0,
+    "boundary_blend_alpha": 1.0,
+    "boundary_bridge_gradient_scale": 0.1,
+    "boundary_continuation_loss_weight": 0.01,
+    "boundary_punctuation_loss_weight": 0.1,
+    "boundary_neutral_loss_weight": 0.1,
+    "boundary_rate_alignment_weight": 0.2,
+    "boundary_rate_calibration_weight": 0.2,
+    "boundary_rate_margin_weight": 0.1,
+    "boundary_rate_density_weight": 0.0,
+    "boundary_rate_dual_lr": 0.0,
+    "coding_rate_loss_weight": 0.0,
+    "use_emit_controller": true,
+    "emit_forward_mode": "hard_st",
+    "emit_value_every": 8,
+    "emit_value_loss_weight": 0.1,
+    "completion_mask_granularity": "readout",
+    "decoder_mode": "shared_inverse",
+    "mask_prob": 0.05,
+    "lr": 0.00005,
+    "warmup_steps": 100,
+    "log_every": 20,
+    "checkpoint_every": 1000,
+    "milestone_every": 1000,
+    "resume": true
+  },
+  "experiments": [
+    {
+      "id": "r1_e0_legacy_emit",
+      "overrides": {
+        "emit_target_mode": "legacy"
+      }
+    },
+    {
+      "id": "r1_e1_cbiu_quality",
+      "overrides": {
+        "emit_target_mode": "cbiu",
+        "cbiu_compute_budget": 0.18,
+        "cbiu_dual_lr": 0.0,
+        "cbiu_augmented_weight": 0.0,
+        "cbiu_utility_temperature": 0.25
+      }
+    },
+    {
+      "id": "r1_e2_cbiu_dual",
+      "overrides": {
+        "emit_target_mode": "cbiu",
+        "cbiu_compute_budget": 0.18,
+        "cbiu_dual_lr": 0.01,
+        "cbiu_dual_max": 10.0,
+        "cbiu_augmented_weight": 0.2,
+        "cbiu_utility_temperature": 0.25
+      }
+    }
+  ]
+}

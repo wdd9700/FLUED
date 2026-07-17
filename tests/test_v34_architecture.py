@@ -158,6 +158,25 @@ def test_v34_emit_threshold_monotonically_reduces_extra_readouts() -> None:
     assert int(high.hard[..., 1:].sum()) <= int(low.hard[..., 1:].sum())
 
 
+def test_v34_emit_controller_supports_small_mlp_and_slot_identity() -> None:
+    controller = ReadoutEmitController(
+        16,
+        initial_extra_probability=0.1,
+        hidden_dim=8,
+        max_readouts=4,
+        use_slot_embedding=True,
+    )
+    candidates = torch.randn(2, 3, 4, 16)
+    chunk_mask = torch.ones(2, 3, dtype=torch.bool)
+    decision = controller(candidates, chunk_mask)
+
+    assert decision.logits.shape == (2, 3, 4)
+    assert decision.hard[..., 0].all()
+    decision.soft[..., 1:].sum().backward()
+    assert controller.slot_embedding.weight.grad is not None
+    assert controller.head[-1].weight.grad is not None
+
+
 def test_v34_rate_emit_main_loss_reaches_both_controllers() -> None:
     torch.manual_seed(11)
     model = FLUEDV34Probe(

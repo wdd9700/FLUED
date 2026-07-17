@@ -12,6 +12,17 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 TRAIN = REPO_ROOT / "tools" / "train" / "v3_4" / "train_v34_pos_ar_probe.py"
 
 
+def _resolve_matrix_base(matrix: dict) -> dict:
+    base: dict = {}
+    if "base_matrix" in matrix:
+        parent = json.loads((REPO_ROOT / matrix["base_matrix"]).read_text(encoding="utf-8"))
+        base.update(_resolve_matrix_base(parent))
+    if "base_file" in matrix:
+        base.update(json.loads((REPO_ROOT / matrix["base_file"]).read_text(encoding="utf-8")))
+    base.update(matrix.get("base", {}))
+    return base
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--matrix", default="configs/v3_4/v34_pos_ar_40m_probe.json")
@@ -26,9 +37,8 @@ def main() -> None:
     parser.add_argument("--rerun-complete", action="store_true")
     args = parser.parse_args()
     matrix = json.loads((REPO_ROOT / args.matrix).read_text(encoding="utf-8"))
-    if "base_file" in matrix:
-        base_file = json.loads((REPO_ROOT / matrix["base_file"]).read_text(encoding="utf-8"))
-        matrix["base"] = {**base_file, **matrix.get("base", {})}
+    if any(key in matrix for key in ("base", "base_file", "base_matrix")):
+        matrix["base"] = _resolve_matrix_base(matrix)
     if "base_config" in matrix:
         parent = json.loads((REPO_ROOT / matrix["base_config"]).read_text(encoding="utf-8"))
         candidates = set(matrix.get("candidates", []))

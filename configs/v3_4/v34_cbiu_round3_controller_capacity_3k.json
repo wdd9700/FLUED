@@ -1,0 +1,46 @@
+{
+  "matrix_name": "v34_cbiu_round3_controller_capacity_3k",
+  "base_matrix": "configs/v3_4/v34_cbiu_round2_emit_only_3k.json",
+  "base": {
+    "max_steps": 3000,
+    "training_scope": "emit_only",
+    "emit_target_mode": "cbiu",
+    "reset_emit_controller": true,
+    "emit_initial_probability": 0.1,
+    "emit_value_every": 1,
+    "emit_value_loss_weight": 1.0,
+    "cbiu_compute_budget": 0.18,
+    "cbiu_dual_lr": 0.001,
+    "cbiu_dual_max": 10.0,
+    "cbiu_augmented_weight": 0.2,
+    "cbiu_utility_temperature": 0.25,
+    "lr": 0.0002,
+    "warmup_steps": 50,
+    "checkpoint_every": 1000,
+    "milestone_every": 1000,
+    "resume": true
+  },
+  "experiments": [
+    {
+      "id": "r3_c0_linear_reset",
+      "overrides": {
+        "emit_controller_hidden": 0,
+        "emit_controller_slot_embedding": false
+      }
+    },
+    {
+      "id": "r3_c1_mlp64",
+      "overrides": {
+        "emit_controller_hidden": 64,
+        "emit_controller_slot_embedding": false
+      }
+    },
+    {
+      "id": "r3_c2_mlp64_slot",
+      "overrides": {
+        "emit_controller_hidden": 64,
+        "emit_controller_slot_embedding": true
+      }
+    }
+  ]
+}

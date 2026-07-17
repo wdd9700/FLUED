@@ -29,6 +29,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from flued.data import BYTE_VOCAB_SIZE, MASK_ID, PAD_ID, text_to_byte_ids  # noqa: E402
 from flued.v34 import FLUEDV34, FLUEDV34Config  # noqa: E402
+from tools.train.v3_4.cbiu import (  # noqa: E402
+    CBIUState,
+    RISK_NAMES as CBIU_RISK_NAMES,
+    cbiu_keep_utility,
+    update_cbiu_dual,
+)
 from tools.train.v3_3.train_v33 import (  # noqa: E402
     LatentInfillBackbone,
     _append_jsonl,
@@ -86,6 +92,8 @@ def build_model(args: argparse.Namespace) -> FLUEDV34:
             emit_forward_mode=getattr(args, "emit_forward_mode", "hard_st"),
             emit_initial_probability=getattr(args, "emit_initial_probability", 0.1),
             emit_threshold=getattr(args, "emit_threshold", 0.5),
+            emit_controller_hidden=getattr(args, "emit_controller_hidden", 0),
+            emit_controller_slot_embedding=getattr(args, "emit_controller_slot_embedding", False),
             max_chunks=args.max_chunks,
             max_span=args.max_span,
             tau_cut=args.tau_cut,
@@ -182,6 +190,293 @@ def _run_completion(
     completed = torch.where((affected_readouts & active_readouts).unsqueeze(-1), predicted, readout)
     logits = model.decode(completed, chunk_mask, active_readouts)
     return logits, compact_z.size(1)
+
+
+def _strict_affected_readouts(
+    masked_slot: torch.Tensor,
+    chunk_mask: torch.Tensor,
+    active_readouts: torch.Tensor,
+) -> torch.Tensor:
+    """Map masked bytes only to executable readouts, with fallback writable."""
+
+    affected_chunks = masked_slot.any(dim=-1) & chunk_mask
+    affected = masked_readouts_from_slots(
+        masked_slot,
+        chunk_mask,
+        active_readouts.size(-1),
+    ) & active_readouts
+    affected = affected.clone()
+    affected[..., 0] |= affected_chunks
+    return affected & active_readouts
+
+
+def _toggle_cbiu_actions(
+    base_z: torch.Tensor,
+    candidates: torch.Tensor,
+    base_active: torch.Tensor,
+    batch_indices: torch.Tensor,
+    chunk_indices: torch.Tensor,
+    slot: int,
+    enabled: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    z = base_z.clone()
+    active = base_active.clone()
+    if batch_indices.numel() == 0:
+        return z, active
+    if enabled:
+        z[batch_indices, chunk_indices, slot] = candidates[batch_indices, chunk_indices, slot]
+        active[batch_indices, chunk_indices, slot] = True
+    else:
+        z[batch_indices, chunk_indices, slot] = 0.0
+        active[batch_indices, chunk_indices, slot] = False
+    return z, active
+
+
+def _gather_action_chunks(
+    values: torch.Tensor,
+    batch_indices: torch.Tensor,
+    chunk_indices: torch.Tensor,
+) -> torch.Tensor:
+    return values[batch_indices, chunk_indices]
+
+
+@torch.no_grad()
+def _score_cbiu_emit_actions(
+    model: FLUEDV34,
+    backbone: LatentInfillBackbone,
+    clean: torch.Tensor,
+    byte_mask: torch.Tensor,
+    training_out,
+    args: argparse.Namespace,
+    global_step: int,
+) -> dict[str, torch.Tensor | int]:
+    """Score one paired extra-readout action per sample with frozen execution noise.
+
+    The same byte anchor identifies the action in clean, masked-score and
+    gradient-carrying training graphs.  Only samples with reconstruction,
+    completion and visible-preservation support produce an emit target.
+    """
+
+    was_model_training = model.training
+    was_backbone_training = backbone.training
+    old_collect = bool(getattr(model, "collect_memory_diagnostics", False))
+    model.eval()
+    backbone.eval()
+    model.collect_memory_diagnostics = False
+    try:
+        valid = clean.ne(PAD_ID)
+        src = clean.masked_fill(byte_mask, MASK_ID)
+        masked_out = model(src)
+        clean_out = model(clean)
+        zero_mask = torch.zeros_like(byte_mask)
+        clean_targets, clean_slot_mask, _ = make_targets(
+            clean,
+            zero_mask,
+            clean_out.chunks.chunk_ids,
+            clean_out.chunks.offsets,
+            args.max_chunks,
+            args.max_span,
+        )
+        masked_targets, masked_slot_mask, masked_slot = make_targets(
+            clean,
+            byte_mask,
+            masked_out.chunks.chunk_ids,
+            masked_out.chunks.offsets,
+            args.max_chunks,
+            args.max_span,
+        )
+        affected_chunks = masked_slot.any(dim=-1) & masked_out.chunks.chunk_mask
+        preserve_slot = masked_slot_mask & affected_chunks.unsqueeze(-1) & ~masked_slot
+        masked_base_active = masked_out.emit_hard.clone()
+        masked_base_active[..., 0] |= masked_out.chunks.chunk_mask
+        valid_bytes = valid.float().sum(dim=1).clamp(min=1.0)
+        policy_cost = masked_base_active.float().sum(dim=(1, 2)) / valid_bytes
+        mapped_affected = masked_readouts_from_slots(
+            masked_slot,
+            masked_out.chunks.chunk_mask,
+            masked_out.readout_z.size(2),
+        )
+        slot = 1 + (global_step // max(args.emit_value_every, 1)) % (masked_out.readout_z.size(2) - 1)
+        eligible_chunks = (
+            affected_chunks
+            & preserve_slot.any(dim=-1)
+            & ~mapped_affected[:, :, slot]
+        )
+
+        batch_ids: list[int] = []
+        masked_chunks: list[int] = []
+        clean_chunks: list[int] = []
+        training_chunks: list[int] = []
+        anchor_positions: list[int] = []
+        for batch_index in range(clean.size(0)):
+            choices = eligible_chunks[batch_index].nonzero(as_tuple=False).flatten()
+            if choices.numel() == 0:
+                continue
+            offset = (global_step // max(args.emit_value_every, 1) + 7 * batch_index) % choices.numel()
+            masked_chunk = int(choices[offset].item())
+            positions = (
+                masked_out.chunks.chunk_ids[batch_index].eq(masked_chunk) & valid[batch_index]
+            ).nonzero(as_tuple=False).flatten()
+            if positions.numel() == 0:
+                continue
+            anchor = int(positions[0].item())
+            clean_chunk = int(clean_out.chunks.chunk_ids[batch_index, anchor].item())
+            training_chunk = int(training_out.chunks.chunk_ids[batch_index, anchor].item())
+            if (
+                clean_chunk < 0
+                or clean_chunk >= clean_out.chunks.chunk_mask.size(1)
+                or training_chunk < 0
+                or training_chunk >= training_out.chunks.chunk_mask.size(1)
+                or not bool(clean_out.chunks.chunk_mask[batch_index, clean_chunk])
+                or not bool(training_out.chunks.chunk_mask[batch_index, training_chunk])
+            ):
+                continue
+            batch_ids.append(batch_index)
+            masked_chunks.append(masked_chunk)
+            clean_chunks.append(clean_chunk)
+            training_chunks.append(training_chunk)
+            anchor_positions.append(anchor)
+
+        batch_indices = torch.tensor(batch_ids, device=clean.device, dtype=torch.long)
+        masked_chunk_indices = torch.tensor(masked_chunks, device=clean.device, dtype=torch.long)
+        clean_chunk_indices = torch.tensor(clean_chunks, device=clean.device, dtype=torch.long)
+        training_chunk_indices = torch.tensor(training_chunks, device=clean.device, dtype=torch.long)
+        anchor_tensor = torch.tensor(anchor_positions, device=clean.device, dtype=torch.long)
+        if batch_indices.numel() == 0:
+            return {
+                "slot": slot,
+                "batch_indices": batch_indices,
+                "training_chunk_indices": training_chunk_indices,
+                "anchor_positions": anchor_tensor,
+                "policy_cost": policy_cost,
+            }
+
+        clean_base_active = clean_out.emit_hard.clone()
+        clean_base_active[..., 0] |= clean_out.chunks.chunk_mask
+        clean_on_z, clean_on_active = _toggle_cbiu_actions(
+            clean_out.readout_z,
+            clean_out.readout_candidates,
+            clean_base_active,
+            batch_indices,
+            clean_chunk_indices,
+            slot,
+            True,
+        )
+        clean_off_z, clean_off_active = _toggle_cbiu_actions(
+            clean_out.readout_z,
+            clean_out.readout_candidates,
+            clean_base_active,
+            batch_indices,
+            clean_chunk_indices,
+            slot,
+            False,
+        )
+        masked_on_z, masked_on_active = _toggle_cbiu_actions(
+            masked_out.readout_z,
+            masked_out.readout_candidates,
+            masked_base_active,
+            batch_indices,
+            masked_chunk_indices,
+            slot,
+            True,
+        )
+        masked_off_z, masked_off_active = _toggle_cbiu_actions(
+            masked_out.readout_z,
+            masked_out.readout_candidates,
+            masked_base_active,
+            batch_indices,
+            masked_chunk_indices,
+            slot,
+            False,
+        )
+
+        clean_on_logits = model.decode(
+            clean_on_z,
+            clean_out.chunks.chunk_mask,
+            clean_on_active,
+        )
+        clean_off_logits = model.decode(
+            clean_off_z,
+            clean_out.chunks.chunk_mask,
+            clean_off_active,
+        )
+        affected_on = _strict_affected_readouts(
+            masked_slot,
+            masked_out.chunks.chunk_mask,
+            masked_on_active,
+        )
+        affected_off = _strict_affected_readouts(
+            masked_slot,
+            masked_out.chunks.chunk_mask,
+            masked_off_active,
+        )
+        masked_on_logits, _ = _run_completion(
+            model,
+            backbone,
+            masked_on_z,
+            masked_on_active,
+            affected_on,
+            masked_out.chunks.chunk_mask,
+        )
+        masked_off_logits, _ = _run_completion(
+            model,
+            backbone,
+            masked_off_z,
+            masked_off_active,
+            affected_off,
+            masked_out.chunks.chunk_mask,
+        )
+
+        ln2 = math.log(2.0)
+        clean_on_risk = _gather_action_chunks(
+            _mean_per_chunk(_ce(clean_on_logits, clean_targets), clean_slot_mask),
+            batch_indices,
+            clean_chunk_indices,
+        ) / ln2
+        clean_off_risk = _gather_action_chunks(
+            _mean_per_chunk(_ce(clean_off_logits, clean_targets), clean_slot_mask),
+            batch_indices,
+            clean_chunk_indices,
+        ) / ln2
+        masked_on_ce = _ce(masked_on_logits, masked_targets)
+        masked_off_ce = _ce(masked_off_logits, masked_targets)
+        fill_on_risk = _gather_action_chunks(
+            _mean_per_chunk(masked_on_ce, masked_slot),
+            batch_indices,
+            masked_chunk_indices,
+        ) / ln2
+        fill_off_risk = _gather_action_chunks(
+            _mean_per_chunk(masked_off_ce, masked_slot),
+            batch_indices,
+            masked_chunk_indices,
+        ) / ln2
+        keep_on_risk = _gather_action_chunks(
+            _mean_per_chunk(masked_on_ce, preserve_slot),
+            batch_indices,
+            masked_chunk_indices,
+        ) / ln2
+        keep_off_risk = _gather_action_chunks(
+            _mean_per_chunk(masked_off_ce, preserve_slot),
+            batch_indices,
+            masked_chunk_indices,
+        ) / ln2
+        on_cost = masked_on_active.float().sum(dim=(1, 2)) / valid_bytes
+        off_cost = masked_off_active.float().sum(dim=(1, 2)) / valid_bytes
+        return {
+            "slot": slot,
+            "batch_indices": batch_indices,
+            "training_chunk_indices": training_chunk_indices,
+            "anchor_positions": anchor_tensor,
+            "on_risks": torch.stack((clean_on_risk, fill_on_risk, keep_on_risk), dim=-1),
+            "off_risks": torch.stack((clean_off_risk, fill_off_risk, keep_off_risk), dim=-1),
+            "on_cost": on_cost[batch_indices],
+            "off_cost": off_cost[batch_indices],
+            "policy_cost": policy_cost,
+        }
+    finally:
+        model.collect_memory_diagnostics = old_collect
+        model.train(was_model_training)
+        backbone.train(was_backbone_training)
 
 
 def boundary_prior_losses_v34(
@@ -480,12 +775,16 @@ def step_model(
     device: torch.device,
     collect_metrics: bool = True,
     global_step: int = -1,
+    cbiu_state: CBIUState | None = None,
+    update_cbiu_state: bool = True,
 ):
     clean = batch[0].to(device, non_blocking=device.type == "cuda")
     valid = clean.ne(PAD_ID)
     byte_mask = make_byte_mask(valid, args.mask_prob, args.mask_span_min, args.mask_span_max)
     src = clean.masked_fill(byte_mask, MASK_ID)
-    model.collect_memory_diagnostics = bool(collect_metrics)
+    model.collect_memory_diagnostics = bool(
+        collect_metrics and args.training_scope != "emit_only"
+    )
     out = model(src)
 
     zero_mask = torch.zeros_like(byte_mask)
@@ -645,76 +944,146 @@ def step_model(
     emit_value_mean = out.readout_z.new_zeros(())
     emit_target_mean = out.readout_z.new_zeros(())
     sampled_emit_slot = 0
+    cbiu_valid_actions = 0
+    cbiu_quality_utility_mean = out.readout_z.new_zeros(())
+    cbiu_cost_utility_mean = out.readout_z.new_zeros(())
+    cbiu_constraint = out.readout_z.new_zeros(())
+    cbiu_predicted_probability_mean = out.readout_z.new_zeros(())
+    cbiu_brier = out.readout_z.new_zeros(())
+    cbiu_sign_accuracy = out.readout_z.new_zeros(())
+    cbiu_on_risk_means = out.readout_z.new_zeros((3,))
+    cbiu_off_risk_means = out.readout_z.new_zeros((3,))
+    cbiu_rho_on_mean = out.readout_z.new_zeros(())
+    cbiu_rho_off_mean = out.readout_z.new_zeros(())
+    cbiu_dominant_risk = out.readout_z.new_zeros((3,))
     if (
         args.use_emit_controller
         and out.readout_z.size(2) > 1
         and global_step >= 0
         and global_step % args.emit_value_every == 0
     ):
-        sampled_emit_slot = 1 + (global_step // args.emit_value_every) % (out.readout_z.size(2) - 1)
-        on_z = out.readout_z.clone()
-        off_z = out.readout_z.clone()
-        on_z[:, :, sampled_emit_slot] = out.readout_candidates[:, :, sampled_emit_slot]
-        off_z[:, :, sampled_emit_slot] = 0.0
-        on_active = active_readouts.clone()
-        off_active = active_readouts.clone()
-        on_active[:, :, sampled_emit_slot] = out.chunks.chunk_mask
-        off_active[:, :, sampled_emit_slot] = False
+        if args.emit_target_mode == "cbiu":
+            if cbiu_state is None:
+                raise RuntimeError("emit_target_mode=cbiu requires initialized CBIU state")
+            scored = _score_cbiu_emit_actions(
+                model,
+                backbone,
+                clean,
+                byte_mask,
+                out,
+                args,
+                global_step,
+            )
+            sampled_emit_slot = int(scored["slot"])
+            action_batches = scored["batch_indices"]
+            action_chunks = scored["training_chunk_indices"]
+            cbiu_valid_actions = int(action_batches.numel())
+            if cbiu_valid_actions > 0:
+                utility = cbiu_keep_utility(
+                    scored["on_risks"],
+                    scored["off_risks"],
+                    scored["on_cost"],
+                    scored["off_cost"],
+                    cbiu_state,
+                    args.cbiu_augmented_weight,
+                )
+                value = utility["net_utility"].detach()
+                target = torch.sigmoid(value / args.cbiu_utility_temperature)
+                predicted_logits = out.emit_logits[
+                    action_batches,
+                    action_chunks,
+                    sampled_emit_slot,
+                ]
+                emit_value_loss = F.binary_cross_entropy_with_logits(predicted_logits, target)
+                predicted_probability = torch.sigmoid(predicted_logits.detach())
+                useful = value.gt(0).to(predicted_probability.dtype)
+                emit_value_mean = value.mean()
+                emit_target_mean = target.mean()
+                cbiu_quality_utility_mean = utility["quality_utility"].mean()
+                cbiu_cost_utility_mean = utility["cost_utility"].mean()
+                cbiu_predicted_probability_mean = predicted_probability.mean()
+                cbiu_brier = (predicted_probability - useful).square().mean()
+                cbiu_sign_accuracy = predicted_probability.ge(0.5).eq(useful.bool()).float().mean()
+                cbiu_on_risk_means = scored["on_risks"].mean(dim=0)
+                cbiu_off_risk_means = scored["off_risks"].mean(dim=0)
+                cbiu_rho_on_mean = utility["rho_on"].mean()
+                cbiu_rho_off_mean = utility["rho_off"].mean()
+                dominant = utility["on_normalized"].argmax(dim=-1)
+                cbiu_dominant_risk = torch.stack(
+                    [dominant.eq(index).float().mean() for index in range(3)]
+                )
+            if model.training and update_cbiu_state:
+                cbiu_constraint = update_cbiu_dual(
+                    cbiu_state,
+                    scored.get("policy_cost", out.readout_z.new_zeros((1,))),
+                    args.cbiu_dual_lr,
+                    args.cbiu_dual_max,
+                ).to(out.readout_z.dtype)
+        else:
+            sampled_emit_slot = 1 + (global_step // args.emit_value_every) % (out.readout_z.size(2) - 1)
+            on_z = out.readout_z.clone()
+            off_z = out.readout_z.clone()
+            on_z[:, :, sampled_emit_slot] = out.readout_candidates[:, :, sampled_emit_slot]
+            off_z[:, :, sampled_emit_slot] = 0.0
+            on_active = active_readouts.clone()
+            off_active = active_readouts.clone()
+            on_active[:, :, sampled_emit_slot] = out.chunks.chunk_mask
+            off_active[:, :, sampled_emit_slot] = False
 
-        on_identity_logits = model.decode(on_z, out.chunks.chunk_mask, on_active)
-        off_identity_logits = model.decode(off_z, out.chunks.chunk_mask, off_active)
-        on_completed_logits, _ = _run_completion(
-            model, backbone, on_z, on_active, affected_readouts, out.chunks.chunk_mask
-        )
-        off_completed_logits, _ = _run_completion(
-            model, backbone, off_z, off_active, affected_readouts, out.chunks.chunk_mask
-        )
-        on_identity = _mean_per_chunk(_ce(on_identity_logits, identity_targets), slot_mask)
-        off_identity = _mean_per_chunk(_ce(off_identity_logits, identity_targets), slot_mask)
-        on_completion_ce = _ce(on_completed_logits, clean_targets)
-        off_completion_ce = _ce(off_completed_logits, clean_targets)
-        on_task = (
-            args.identity_loss_weight * on_identity
-            + args.completion_loss_weight * _mean_per_chunk(on_completion_ce, masked_slot)
-            + args.preserve_loss_weight * _mean_per_chunk(on_completion_ce, preserve_slot)
-        )
-        off_task = (
-            args.identity_loss_weight * off_identity
-            + args.completion_loss_weight * _mean_per_chunk(off_completion_ce, masked_slot)
-            + args.preserve_loss_weight * _mean_per_chunk(off_completion_ce, preserve_slot)
-        )
-        removal_delta = (off_task - on_task).detach()
+            on_identity_logits = model.decode(on_z, out.chunks.chunk_mask, on_active)
+            off_identity_logits = model.decode(off_z, out.chunks.chunk_mask, off_active)
+            on_completed_logits, _ = _run_completion(
+                model, backbone, on_z, on_active, affected_readouts, out.chunks.chunk_mask
+            )
+            off_completed_logits, _ = _run_completion(
+                model, backbone, off_z, off_active, affected_readouts, out.chunks.chunk_mask
+            )
+            on_identity = _mean_per_chunk(_ce(on_identity_logits, identity_targets), slot_mask)
+            off_identity = _mean_per_chunk(_ce(off_identity_logits, identity_targets), slot_mask)
+            on_completion_ce = _ce(on_completed_logits, clean_targets)
+            off_completion_ce = _ce(off_completed_logits, clean_targets)
+            on_task = (
+                args.identity_loss_weight * on_identity
+                + args.completion_loss_weight * _mean_per_chunk(on_completion_ce, masked_slot)
+                + args.preserve_loss_weight * _mean_per_chunk(on_completion_ce, preserve_slot)
+            )
+            off_task = (
+                args.identity_loss_weight * off_identity
+                + args.completion_loss_weight * _mean_per_chunk(off_completion_ce, masked_slot)
+                + args.preserve_loss_weight * _mean_per_chunk(off_completion_ce, preserve_slot)
+            )
+            removal_delta = (off_task - on_task).detach()
 
-        chunk_rate = removal_delta.new_zeros(out.chunks.chunk_mask.shape)
-        starts = out.policy.hard_cut & valid
-        b_idx, t_idx = starts.nonzero(as_tuple=True)
-        c_idx = out.chunks.chunk_ids[b_idx, t_idx]
-        in_range = c_idx.ge(0) & c_idx.lt(out.chunks.chunk_mask.size(1))
-        chunk_rate[b_idx[in_range], c_idx[in_range]] = out.aux["marginal_coding_rate"][
-            b_idx[in_range], t_idx[in_range]
-        ].detach().float()
-        active_rate = chunk_rate[out.chunks.chunk_mask]
-        rate_scale = active_rate.abs().mean().clamp(min=1.0e-6)
-        normalized_rate = chunk_rate / rate_scale
+            chunk_rate = removal_delta.new_zeros(out.chunks.chunk_mask.shape)
+            starts = out.policy.hard_cut & valid
+            b_idx, t_idx = starts.nonzero(as_tuple=True)
+            c_idx = out.chunks.chunk_ids[b_idx, t_idx]
+            in_range = c_idx.ge(0) & c_idx.lt(out.chunks.chunk_mask.size(1))
+            chunk_rate[b_idx[in_range], c_idx[in_range]] = out.aux["marginal_coding_rate"][
+                b_idx[in_range], t_idx[in_range]
+            ].detach().float()
+            active_rate = chunk_rate[out.chunks.chunk_mask]
+            rate_scale = active_rate.abs().mean().clamp(min=1.0e-6)
+            normalized_rate = chunk_rate / rate_scale
 
-        active_count = active_readouts.float().sum(dim=(1, 2), keepdim=False)
-        max_count = out.chunks.chunk_mask.float().sum(dim=1) * out.readout_z.size(2)
-        marginal_compute_cost = args.emit_compute_cost_weight * (
-            1.0 + active_count / max_count.clamp(min=1.0)
-        ).unsqueeze(1)
-        value = (
-            removal_delta
-            + args.emit_rate_value_weight * normalized_rate
-            - marginal_compute_cost
-        )
-        target = torch.sigmoid(value / args.emit_value_temperature).detach()
-        active_chunks = out.chunks.chunk_mask
-        emit_value_loss = F.binary_cross_entropy_with_logits(
-            out.emit_logits[:, :, sampled_emit_slot][active_chunks],
-            target[active_chunks],
-        )
-        emit_value_mean = value[active_chunks].mean()
-        emit_target_mean = target[active_chunks].mean()
+            active_count = active_readouts.float().sum(dim=(1, 2), keepdim=False)
+            max_count = out.chunks.chunk_mask.float().sum(dim=1) * out.readout_z.size(2)
+            marginal_compute_cost = args.emit_compute_cost_weight * (
+                1.0 + active_count / max_count.clamp(min=1.0)
+            ).unsqueeze(1)
+            value = (
+                removal_delta
+                + args.emit_rate_value_weight * normalized_rate
+                - marginal_compute_cost
+            )
+            target = torch.sigmoid(value / args.emit_value_temperature).detach()
+            active_chunks = out.chunks.chunk_mask
+            emit_value_loss = F.binary_cross_entropy_with_logits(
+                out.emit_logits[:, :, sampled_emit_slot][active_chunks],
+                target[active_chunks],
+            )
+            emit_value_mean = value[active_chunks].mean()
+            emit_target_mean = target[active_chunks].mean()
     continuation_weight = (
         args.boundary_loss_weight
         if args.boundary_continuation_loss_weight is None
@@ -751,6 +1120,10 @@ def step_model(
         + args.emit_value_loss_weight * emit_value_loss
         + args.ar_delta_loss_weight * out.ar_delta
     )
+    if args.training_scope == "emit_only":
+        # Pure policy attribution: the interface and temporary backbone stay
+        # frozen, and no task-gradient shortcut is allowed into the gate.
+        loss = args.emit_value_loss_weight * emit_value_loss + 0.0 * out.emit_logits.sum()
     if (
         model.training
         and global_step >= 0
@@ -863,7 +1236,31 @@ def step_model(
             "emit_value_mean": float(emit_value_mean.item()),
             "emit_target_mean": float(emit_target_mean.item()),
             "sampled_emit_slot": float(sampled_emit_slot),
+            "cbiu_valid_actions": float(cbiu_valid_actions),
+            "cbiu_quality_utility_mean": float(cbiu_quality_utility_mean.item()),
+            "cbiu_cost_utility_mean": float(cbiu_cost_utility_mean.item()),
+            "cbiu_net_utility_mean": float(emit_value_mean.item()) if args.emit_target_mode == "cbiu" else 0.0,
+            "cbiu_compute_constraint": float(cbiu_constraint.item()),
+            "cbiu_compute_dual": float(cbiu_state.compute_dual.item()) if cbiu_state is not None else 0.0,
+            "cbiu_predicted_probability_mean": float(cbiu_predicted_probability_mean.item()),
+            "cbiu_brier": float(cbiu_brier.item()),
+            "cbiu_sign_accuracy": float(cbiu_sign_accuracy.item()),
+            "cbiu_rho_on_mean": float(cbiu_rho_on_mean.item()),
+            "cbiu_rho_off_mean": float(cbiu_rho_off_mean.item()),
+            **{
+                f"cbiu_{name}_on_bpb": float(cbiu_on_risk_means[index].item())
+                for index, name in enumerate(CBIU_RISK_NAMES)
+            },
+            **{
+                f"cbiu_{name}_off_bpb": float(cbiu_off_risk_means[index].item())
+                for index, name in enumerate(CBIU_RISK_NAMES)
+            },
+            **{
+                f"cbiu_dominant_{name}_fraction": float(cbiu_dominant_risk[index].item())
+                for index, name in enumerate(CBIU_RISK_NAMES)
+            },
             "soft_readout_units_per_byte": float(out.emit_soft.sum().item() / bytes_n.item()),
+            "policy_readout_units_per_byte": float(out.emit_hard.float().sum().item() / bytes_n.item()),
             "actual_backbone_units_per_byte": float(active_readouts.float().sum().item() / bytes_n.item()),
             "backbone_padded_units_per_byte": float(
                 backbone_padded_units * clean.size(0) / bytes_n.item()
@@ -911,7 +1308,7 @@ def order_probe(model: FLUEDV34, seq_len: int, device: torch.device) -> Dict[str
 
 
 @torch.no_grad()
-def evaluate(model, backbone, loader, args, device) -> Dict[str, float]:
+def evaluate(model, backbone, loader, args, device, cbiu_state: CBIUState | None = None) -> Dict[str, float]:
     model.eval()
     backbone.eval()
     rows: List[Dict[str, float]] = []
@@ -932,6 +1329,8 @@ def evaluate(model, backbone, loader, args, device) -> Dict[str, float]:
                 device,
                 collect_metrics=True,
                 global_step=eval_step,
+                cbiu_state=cbiu_state,
+                update_cbiu_state=False,
             )
             rows.append(metrics)
     result = _avg_metrics(rows)
@@ -958,6 +1357,7 @@ def run(args: argparse.Namespace) -> dict:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "resolved_config.json").write_text(json.dumps(vars(args), ensure_ascii=False, indent=2), encoding="utf-8")
+    latest_path = out_dir / "latest.pt"
 
     model = build_model(args).to(device)
     model.boundary_rate_dual = torch.zeros((), device=device)
@@ -970,6 +1370,44 @@ def run(args: argparse.Namespace) -> dict:
         args.max_chunks * args.readout_vectors,
         0.0,
     ).to(device)
+    if args.emit_target_mode == "cbiu" and args.decoder_mode != "shared_inverse":
+        raise ValueError("online CBIU requires decoder_mode=shared_inverse so hard emit changes execution")
+    cbiu_state = None
+    if args.emit_target_mode == "cbiu":
+        if not args.cbiu_anchor_file:
+            raise ValueError("emit_target_mode=cbiu requires --cbiu-anchor-file")
+        cbiu_state = CBIUState.from_anchor_file(
+            args.cbiu_anchor_file,
+            args.cbiu_compute_budget,
+            device,
+        )
+        if args.cbiu_require_anchor_checkpoint_match and args.init_checkpoint:
+            expected = Path(cbiu_state.anchor_checkpoint).resolve()
+            actual = Path(args.init_checkpoint).resolve()
+            if expected != actual:
+                raise RuntimeError(
+                    "CBIU anchor checkpoint does not match initialization checkpoint: "
+                    f"anchor={expected}, init={actual}"
+                )
+    if args.init_checkpoint and not (args.resume and latest_path.exists()) and not args.dry_run:
+        init_path = Path(args.init_checkpoint)
+        init_payload = torch.load(init_path, map_location=device, weights_only=False)
+        if args.reset_emit_controller:
+            init_model = {
+                key: value
+                for key, value in init_payload["model"].items()
+                if not key.startswith("emit_controller.")
+            }
+            missing, unexpected = model.load_state_dict(init_model, strict=False)
+            if unexpected or any(not key.startswith("emit_controller.") for key in missing):
+                raise RuntimeError(
+                    f"unexpected partial initialization mismatch: missing={missing}, unexpected={unexpected}"
+                )
+            model.emit_controller.reset_parameters()
+        else:
+            model.load_state_dict(init_payload["model"])
+        backbone.load_state_dict(init_payload["backbone"])
+        print(f"[init-checkpoint] {init_path}", flush=True)
     model_params = sum(p.numel() for p in model.parameters())
     backbone_params = sum(p.numel() for p in backbone.parameters())
     result_base = {
@@ -985,11 +1423,20 @@ def run(args: argparse.Namespace) -> dict:
         return result_base
 
     train_loader, eval_loader = make_dataloaders(args)
-    params = list(model.parameters()) + list(backbone.parameters())
+    if args.training_scope == "emit_only":
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+        for parameter in backbone.parameters():
+            parameter.requires_grad_(False)
+        for parameter in model.emit_controller.parameters():
+            parameter.requires_grad_(True)
+        params = list(model.emit_controller.parameters())
+    else:
+        params = list(model.parameters()) + list(backbone.parameters())
+    result_base["trainable_params"] = sum(parameter.numel() for parameter in params)
     optimizer = build_optimizer(args, params)
     scheduler = _cosine_with_warmup(optimizer, args.warmup_steps, args.max_steps)
     start_step = 0
-    latest_path = out_dir / "latest.pt"
     if args.resume and latest_path.exists():
         resume_payload = torch.load(latest_path, map_location=device, weights_only=False)
         if "optimizer" in resume_payload and "scheduler" in resume_payload:
@@ -1011,6 +1458,10 @@ def run(args: argparse.Namespace) -> dict:
                 torch.cuda.set_rng_state(resume_payload["cuda_rng_state"].cpu(), device)
             if "boundary_rate_dual" in resume_payload:
                 model.boundary_rate_dual.copy_(resume_payload["boundary_rate_dual"].to(device))
+            if cbiu_state is not None:
+                if "cbiu_state" not in resume_payload:
+                    raise RuntimeError("CBIU checkpoint has no protocol state; refusing silent reset")
+                cbiu_state.load_state_dict(resume_payload["cbiu_state"], device)
             print(f"[resume] {latest_path} at completed_step={start_step}", flush=True)
 
     def checkpoint_payload(completed_step: int, summary: dict | None = None) -> dict:
@@ -1030,6 +1481,8 @@ def run(args: argparse.Namespace) -> dict:
             },
             "boundary_rate_dual": model.boundary_rate_dual.detach().cpu(),
         }
+        if cbiu_state is not None:
+            payload["cbiu_state"] = cbiu_state.state_dict()
         if device.type == "cuda":
             payload["cuda_rng_state"] = torch.cuda.get_rng_state(device)
         return payload
@@ -1063,7 +1516,14 @@ def run(args: argparse.Namespace) -> dict:
         collect = step % args.log_every == 0
         with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=args.amp and device.type == "cuda"):
             loss, metrics = step_model(
-                model, backbone, batch, args, device, collect_metrics=collect, global_step=step
+                model,
+                backbone,
+                batch,
+                args,
+                device,
+                collect_metrics=collect,
+                global_step=step,
+                cbiu_state=cbiu_state,
             )
         loss.backward()
         if collect:
@@ -1118,7 +1578,7 @@ def run(args: argparse.Namespace) -> dict:
     train_peak_memory_gb = (
         torch.cuda.max_memory_allocated(device) / (1024**3) if device.type == "cuda" else 0.0
     )
-    eval_stats = evaluate(model, backbone, eval_loader, args, device)
+    eval_stats = evaluate(model, backbone, eval_loader, args, device, cbiu_state=cbiu_state)
     elapsed = time.perf_counter() - start
     result = {
         **result_base,
@@ -1154,6 +1614,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=known.config)
     parser.add_argument("--run-id", default="v34_probe")
     parser.add_argument("--out-dir", default="checkpoints/v34_probe")
+    parser.add_argument("--init-checkpoint", default="")
     parser.add_argument("--data-manifest", default="")
     parser.add_argument("--data-path", default="")
     parser.add_argument("--streaming-train", action=argparse.BooleanOptionalAction, default=True)
@@ -1239,6 +1700,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--emit-forward-mode", choices=["hard_st", "soft"], default="hard_st")
     parser.add_argument("--emit-initial-probability", type=float, default=0.1)
     parser.add_argument("--emit-threshold", type=float, default=0.5)
+    parser.add_argument("--emit-controller-hidden", type=int, default=0)
+    parser.add_argument("--emit-controller-slot-embedding", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--reset-emit-controller", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--max-chunks", type=int, default=64)
     parser.add_argument("--max-span", type=int, default=128)
     parser.add_argument("--tau-cut", type=float, default=0.9)
@@ -1288,15 +1752,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--memory-usage-max", type=float, default=0.50)
     parser.add_argument("--emit-value-loss-weight", type=float, default=0.1)
     parser.add_argument("--emit-value-every", type=int, default=4)
+    parser.add_argument("--emit-target-mode", choices=["legacy", "cbiu"], default="legacy")
     parser.add_argument("--emit-rate-value-weight", type=float, default=0.05)
     parser.add_argument("--emit-compute-cost-weight", type=float, default=0.05)
     parser.add_argument("--emit-value-temperature", type=float, default=0.25)
+    parser.add_argument("--cbiu-anchor-file", default="")
+    parser.add_argument("--cbiu-require-anchor-checkpoint-match", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--cbiu-compute-budget", type=float, default=0.18)
+    parser.add_argument("--cbiu-dual-lr", type=float, default=0.0)
+    parser.add_argument("--cbiu-dual-max", type=float, default=20.0)
+    parser.add_argument("--cbiu-augmented-weight", type=float, default=0.0)
+    parser.add_argument("--cbiu-utility-temperature", type=float, default=0.25)
     parser.add_argument("--ar-delta-loss-weight", type=float, default=0.01)
     parser.add_argument("--backbone-hidden", type=int, default=384)
     parser.add_argument("--backbone-layers", type=int, default=3)
     parser.add_argument("--backbone-nhead", type=int, default=8)
     parser.add_argument("--backbone-ffn-dim", type=int, default=1024)
     parser.add_argument("--optimizer", choices=["fused_adamw", "foreach_adamw", "adamw"], default="fused_adamw")
+    parser.add_argument("--training-scope", choices=["joint", "emit_only"], default="joint")
     parser.add_argument("--lr", type=float, default=2.0e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-steps", type=int, default=100)
