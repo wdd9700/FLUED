@@ -70,11 +70,39 @@ v3.4 结束时，FLUED 的单个模块几乎全部能在隔离条件下工作，
 | hard emit | 保留，但**引入协议错误**：阶跃接管直接造成坍缩（0.808→0.146），必须连续预算退火 | followup 实验 C |
 | legacy emit 价值监督 | 废弃，由离线效用层取代 | emit_value_mean 20K 退化到≈0；legacy 校准 AUC≈0.50 |
 | memory | **降级为隔离研究分支**，不进主循环默认；byte-anchor 有序变体实验是其最后举证机会 | 直接内容效应弱；主要效应为训练路径正则化与 emit 容量中介 |
-| 共享逆 decoder | **判死**。接受独立 decoder 的参数代价，或共享初始化+独立参数+周期对齐 | 同预算大幅落后，三种廉价解耦证伪 |
+| 共享逆 decoder | **判死**。接受独立 decoder 的参数代价，或共享初始化+独立参数+周期对齐 | 同预算大幅落后，三种廉价解耦证伪；且共享逆路径的 chunk 内顺序探针退化到 0.039（独立 decoder 1.17，见第 3.1 节补注） |
 | boundary×emit 双控制器 | **合并为统一预算分配器** | 两者是同一 latent 预算的乘性旋钮，独立监督互相博弈（V0 中介实锤、实验 C 接管冲击） |
 
 合并后的主循环只剩：byte lookup → segmentor → interpreter → 独立 decoder，
 以及单一预算变量。其余全部移到冻结层。
+
+### 3.1 补注：chunk 内顺序敏感性与 decoder 路径的关系（2026-07-17 晚）
+
+仓库的 `order_probe` 在每次评估时测量同一 chunk 内两字符互换（swap）与两字符替换
+（substitute）对 readout 的相对扰动，`order_readout_swap_to_substitute` 接近 0 表示
+bag-of-bytes（v3.3 曾实锤 diff=0.0），接近或超过 1 表示顺序变化被完整注册。
+20K 终点各臂实测：
+
+| 臂（均 RoPE + 小 AR） | swap/subst | 解读 |
+|---|---:|---|
+| d0 共享逆 baseline（canonical 基座） | **0.039** | 近 bag-of-bytes，顺序通道被联合训练抹掉 |
+| d1 独立 decoder | **1.170** | 顺序完整注册，swap 扰动甚至大于替换 |
+| d2 预热 2K | 0.697 | 部分恢复 |
+| d3 交替 500 | 0.841 | 部分恢复 |
+| d4 梯度缩放 0.3 | 0.832 | 部分恢复 |
+| mo_control（共享逆，refined 基座） | 0.961 | 配置细节也能保住顺序 |
+| mo_byte_alibi | 0.840 | 中 |
+| mo_chunk_rope | 0.950 | 高 |
+| mo_set_nopos | 0.751 | 低 |
+
+含义：
+
+1. RoPE + 小 AR 提供顺序**能力**（1K 四组消融 0.00→0.64），但能力是否兑现取决于
+   训练路径——共享逆联合优化可以把已具备的能力重新抹掉（d0=0.039）；
+2. 这为独立 decoder 判决增加了机制层证据：共享逆很可能通过学习位置不变的池化
+   捷径来降低逆映射难度，这与其 21% vs 55% 的重建差距互为表里；
+3. "顺序对翻译不重要"是误读：翻译（chunk 内字节序）在健康配置下完全注册；
+   不重要的是"跨 chunk memory 集合的顺序"（见 5.5 诚实边界）。
 
 ---
 
@@ -214,10 +242,15 @@ memory 不进主循环；在冻结 L0/L1 上做因果拆分：
    量级一致，弱正。
 
 诚实边界：本结果不能区分"有序 memory 无用"与"memory 通道太弱测不出有序性"
-（memory_residual_ratio≈0.05）。若要最终判死，需在 memory 通道足够强的配置
-（更大 residual scale 或 2048 长上下文）复测。按本设计判据，当前结论为
-**memory 举证失败，走 8.1 叙事**：memory 移出 scaling 配置，保留为附录机制分析；
-有序 memory 投稿叙事（8.2）搁置，除非上述强化配置复测翻案。
+（memory_residual_ratio≈0.05）。更根本的结构性问题是：**512 byte 协议下 backbone
+可以看到全部 readout（约 100 个），跨 chunk 上下文完全不经过 memory——memory
+在构造上就是冗余通道**，有序与无序自然无差别。因此 5.5 的失败裁决的准确含义是
+"backbone 全可见时 memory 冗余"，不是"memory 本质无用"。要真正判死或翻案，
+必须满足以下任一条件后复测：(a) 截断 backbone 可见 readout 数，使 memory 成为
+远距离内容的唯一通道；(b) 2048/4096 长度 + 受限 backbone latent 预算；
+(c) streaming/prefill 场景，历史 readout 被淘汰、memory 是唯一持久状态。
+按本设计判据，当前结论为 **memory 举证失败，走 8.1 叙事**：memory 移出 scaling
+配置，保留为附录机制分析；有序 memory 投稿叙事（8.2）搁置。
 
 ### 5.6 L5：联合微调（可选）
 
