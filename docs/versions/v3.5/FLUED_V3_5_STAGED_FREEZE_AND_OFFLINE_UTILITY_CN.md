@@ -2,9 +2,11 @@
 
 > 日期：2026-07-17（晚，交接复核后）
 > 状态：**设计草案，未并入主线**。本文自成体系；若后续实验（尤其 byte-anchor 有序 memory、
-> emit 连续退火、离线 CBIU 复测）支持其命题，改名并入主线文档即可。
+> emit 连续退火、离线 CBIU 复测）支持其命题，改名并入主线即可。
 > 前置阅读：`FLUED_HANDOFF_20260717_CN.md`、
 > `docs/versions/v3.4/FLUED_V3_4_FOLLOWUP_EXPERIMENTS_20260717_CN.md`（三组证伪实验）。
+> **L0-L3 工程层结果：[`FLUED_V3_5_PRESCALING_RESULTS_20260717_CN.md`](FLUED_V3_5_PRESCALING_RESULTS_20260717_CN.md)**——
+> L0 饱和（0.993）、分位数退火首个平滑压缩机制、L1 接口完全转移、L3 效用证实为类级信号（类均值 0.439 vs 实例 MLP 0.095，未过闸）。
 
 ---
 

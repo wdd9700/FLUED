@@ -1,0 +1,25 @@
+{
+  "matrix_name": "v35_emit_anneal_20k",
+  "base_matrix": "configs/v3_5/v35_l0_codec_20k.json",
+  "base": {
+    "use_emit_controller": true,
+    "seed": 42,
+    "eval_mask_seed": 1042
+  },
+  "experiments": [
+    {
+      "id": "e1_emit_step_3k",
+      "overrides": {
+        "emit_warmup_steps": 3000
+      }
+    },
+    {
+      "id": "e2_emit_anneal_3k_8k",
+      "overrides": {
+        "emit_budget_anneal_start": 3000,
+        "emit_budget_anneal_end": 8000,
+        "emit_budget_target": 0.2
+      }
+    }
+  ]
+}

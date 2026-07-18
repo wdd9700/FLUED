@@ -824,8 +824,9 @@ class FLUEDV34Probe(nn.Module):
         active_lookup = self.byte_lookup if c.use_structured_lookup else self.plain_byte_lookup
         x = active_lookup(token_ids)
         if getattr(self, "collect_memory_diagnostics", False) and torch.is_grad_enabled():
-            x.retain_grad()
-            self._diagnostic_byte_input = x
+            if x.requires_grad:
+                x.retain_grad()
+                self._diagnostic_byte_input = x
         if self.use_prompt_position:
             prompt_position = _sinusoidal_position(
                 token_ids.size(1), c.d_model, x.device, x.dtype
@@ -1100,7 +1101,11 @@ class FLUEDV34Probe(nn.Module):
         for block in self.interpreter_blocks:
             flat = block(flat, flat_valid, local_noise)
         readout_candidates = flat.reshape_as(readout)
-        emit = self.emit_controller(readout_candidates, chunks.chunk_mask)
+        emit = self.emit_controller(
+            readout_candidates,
+            chunks.chunk_mask,
+            budget_fraction=getattr(self, "emit_budget_override", None),
+        )
         if c.use_emit_controller and not getattr(self, "emit_warmup_active", False):
             if c.emit_forward_mode == "hard_st":
                 readout = readout_candidates * emit.straight_through.unsqueeze(-1).to(readout_candidates.dtype)

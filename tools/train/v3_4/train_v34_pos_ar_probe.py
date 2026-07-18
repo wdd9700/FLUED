@@ -1134,6 +1134,12 @@ def step_model(
         # Pure policy attribution: the interface and temporary backbone stay
         # frozen, and no task-gradient shortcut is allowed into the gate.
         loss = args.emit_value_loss_weight * emit_value_loss + 0.0 * out.emit_logits.sum()
+    if args.training_scope == "backbone_only":
+        # Frozen interface: only the temporary backbone learns to complete.
+        loss = (
+            args.completion_loss_weight * masked_loss
+            + args.preserve_loss_weight * preserve_loss
+        )
     if (
         model.training
         and global_step >= 0
@@ -1166,6 +1172,7 @@ def step_model(
             "identity_weight_effective": float(identity_scale * args.identity_loss_weight),
             "completion_weight_effective": float(completion_scale * args.completion_loss_weight),
             "emit_warmup_active": float(bool(getattr(model, "emit_warmup_active", False))),
+            "emit_budget_override": float(getattr(model, "emit_budget_override", None) or 0.0),
             "identity_acc": _safe_acc(identity_pred, identity_targets, slot_mask),
             "identity_mask_is_mask_acc": _safe_acc(identity_pred, identity_targets, masked_slot),
             "completion_mask_acc": _safe_acc(completed_pred, clean_targets, masked_slot),
@@ -1326,6 +1333,9 @@ def evaluate(model, backbone, loader, args, device, cbiu_state: CBIUState | None
     backbone.eval()
     previous_emit_warmup = getattr(model, "emit_warmup_active", False)
     model.emit_warmup_active = False
+    previous_emit_budget = getattr(model, "emit_budget_override", None)
+    if getattr(args, "emit_budget_anneal_end", 0) > 0 and args.use_emit_controller:
+        model.emit_budget_override = float(args.emit_budget_target)
     rows: List[Dict[str, float]] = []
     fork_devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
     with torch.random.fork_rng(devices=fork_devices):
@@ -1351,6 +1361,7 @@ def evaluate(model, backbone, loader, args, device, cbiu_state: CBIUState | None
     result = _avg_metrics(rows)
     result.update(order_probe(model, args.seq_len, device))
     model.emit_warmup_active = previous_emit_warmup
+    model.emit_budget_override = previous_emit_budget
     model.train()
     backbone.train()
     return result
@@ -1422,7 +1433,10 @@ def run(args: argparse.Namespace) -> dict:
             model.emit_controller.reset_parameters()
         else:
             model.load_state_dict(init_payload["model"])
-        backbone.load_state_dict(init_payload["backbone"])
+        if args.reset_backbone:
+            print("[init-checkpoint] backbone kept at fresh initialization", flush=True)
+        else:
+            backbone.load_state_dict(init_payload["backbone"])
         print(f"[init-checkpoint] {init_path}", flush=True)
     model_params = sum(p.numel() for p in model.parameters())
     backbone_params = sum(p.numel() for p in backbone.parameters())
@@ -1447,6 +1461,10 @@ def run(args: argparse.Namespace) -> dict:
         for parameter in model.emit_controller.parameters():
             parameter.requires_grad_(True)
         params = list(model.emit_controller.parameters())
+    elif args.training_scope == "backbone_only":
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+        params = list(backbone.parameters())
     else:
         params = list(model.parameters()) + list(backbone.parameters())
     result_base["trainable_params"] = sum(parameter.numel() for parameter in params)
@@ -1520,6 +1538,11 @@ def run(args: argparse.Namespace) -> dict:
         model.emit_warmup_active = bool(
             args.use_emit_controller and args.emit_warmup_steps > 0 and step < args.emit_warmup_steps
         )
+        if args.use_emit_controller and args.emit_budget_anneal_end > 0:
+            progress = min(max((step - args.emit_budget_anneal_start) / max(args.emit_budget_anneal_end - args.emit_budget_anneal_start, 1), 0.0), 1.0)
+            model.emit_budget_override = 1.0 - (1.0 - args.emit_budget_target) * progress
+        else:
+            model.emit_budget_override = None
         if apply_boundary_curriculum(model, args, step):
             print(
                 f"[boundary-curriculum] switch at step={step}: "
@@ -1719,10 +1742,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--emit-forward-mode", choices=["hard_st", "soft"], default="hard_st")
     parser.add_argument("--emit-initial-probability", type=float, default=0.1)
     parser.add_argument("--emit-warmup-steps", type=int, default=0)
+    parser.add_argument("--emit-budget-anneal-start", type=int, default=0)
+    parser.add_argument("--emit-budget-anneal-end", type=int, default=0)
+    parser.add_argument("--emit-budget-target", type=float, default=0.2)
     parser.add_argument("--emit-threshold", type=float, default=0.5)
     parser.add_argument("--emit-controller-hidden", type=int, default=0)
     parser.add_argument("--emit-controller-slot-embedding", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--reset-emit-controller", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--reset-backbone", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--max-chunks", type=int, default=64)
     parser.add_argument("--max-span", type=int, default=128)
     parser.add_argument("--tau-cut", type=float, default=0.9)
@@ -1792,7 +1819,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backbone-nhead", type=int, default=8)
     parser.add_argument("--backbone-ffn-dim", type=int, default=1024)
     parser.add_argument("--optimizer", choices=["fused_adamw", "foreach_adamw", "adamw"], default="fused_adamw")
-    parser.add_argument("--training-scope", choices=["joint", "emit_only"], default="joint")
+    parser.add_argument("--training-scope", choices=["joint", "emit_only", "backbone_only"], default="joint")
     parser.add_argument("--lr", type=float, default=2.0e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-steps", type=int, default=100)

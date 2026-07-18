@@ -190,7 +190,12 @@ class ReadoutEmitController(nn.Module):
             nn.init.zeros_(self.head.weight)
             nn.init.constant_(self.head.bias, bias)
 
-    def forward(self, candidates: torch.Tensor, chunk_mask: torch.Tensor) -> EmitDecision:
+    def forward(
+        self,
+        candidates: torch.Tensor,
+        chunk_mask: torch.Tensor,
+        budget_fraction: float | None = None,
+    ) -> EmitDecision:
         # Controller losses specialize the controller rather than distorting a
         # candidate representation merely to change its emit score.
         controller_input = candidates.detach()
@@ -207,10 +212,24 @@ class ReadoutEmitController(nn.Module):
             )
         logits = self.head(self.norm(controller_input)).squeeze(-1)
         soft = torch.sigmoid(logits) * chunk_mask.unsqueeze(-1).to(logits.dtype)
-        hard = soft.ge(self.threshold) & chunk_mask.unsqueeze(-1)
-        if hard.size(-1):
-            hard = hard.clone()
-            hard[..., 0] = chunk_mask
+        if budget_fraction is not None:
+            extra = soft.size(-1) - 1
+            keep = int(round(extra * min(max(float(budget_fraction), 0.0), 1.0)))
+            ranked = soft.clone()
+            if ranked.size(-1):
+                ranked[..., 0] = float("-inf")
+            hard = torch.zeros_like(soft, dtype=torch.bool)
+            if keep > 0 and extra > 0:
+                top = ranked.topk(min(keep, extra), dim=-1).indices
+                hard.scatter_(-1, top, True)
+            hard = hard & chunk_mask.unsqueeze(-1)
+            if hard.size(-1):
+                hard[..., 0] = chunk_mask
+        else:
+            hard = soft.ge(self.threshold) & chunk_mask.unsqueeze(-1)
+            if hard.size(-1):
+                hard[..., 0] = chunk_mask
+        if soft.size(-1):
             soft = soft.clone()
             soft[..., 0] = chunk_mask.to(soft.dtype)
         straight_through = soft + (hard.to(soft.dtype) - soft).detach()

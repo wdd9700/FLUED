@@ -1,0 +1,37 @@
+{
+  "matrix_name": "v35_l0_codec_20k",
+  "base_file": "configs/v3_4/v34_default_38m_20k.json",
+  "base": {
+    "data_path": "E:\\projects\\SoulMamba\\soulvlm_project\\temp\\corpus_v3.txt",
+    "max_steps": 20000,
+    "max_eval_batches": 32,
+    "checkpoint_every": 1000,
+    "milestone_every": 3000,
+    "use_memory": false,
+    "memory_usage_loss_weight": 0.0,
+    "use_structured_lookup": false,
+    "decoder_mode": "legacy_independent",
+    "use_emit_controller": false,
+    "boundary_mode": "uniform_budget",
+    "boundary_curriculum_switch_step": 0,
+    "boundary_coding_rate_mode": "diag",
+    "boundary_curriculum_coding_rate_mode": "diag",
+    "resume": true
+  },
+  "experiments": [
+    {
+      "id": "l0_codec_s042",
+      "overrides": {
+        "seed": 42,
+        "eval_mask_seed": 1042
+      }
+    },
+    {
+      "id": "l0_codec_s123",
+      "overrides": {
+        "seed": 123,
+        "eval_mask_seed": 1042
+      }
+    }
+  ]
+}
