@@ -1682,7 +1682,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--segmentor-layers", type=int, default=5)
     parser.add_argument("--interpreter-layers", type=int, default=3)
     parser.add_argument("--memory-rank", type=int, default=4)
-    parser.add_argument("--readout-vectors", type=int, default=4)
+    parser.add_argument("--readout-vectors", type=int, default=16)
     parser.add_argument("--ar-hidden", type=int, default=128)
     parser.add_argument("--use-position", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
@@ -1690,17 +1690,17 @@ def parse_args() -> argparse.Namespace:
         choices=["layered_rope", "prompt_additive", "prompt_plus_local_rope", "none"],
         default="layered_rope",
     )
-    parser.add_argument("--prompt-position-scale", type=float, default=0.1)
-    parser.add_argument("--use-prompt-alibi", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--prompt-position-scale", type=float, default=0.0)
+    parser.add_argument("--use-prompt-alibi", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use-ar", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--use-structured-lookup", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--use-memory", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--use-structured-lookup", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--use-memory", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--use-boundary-bridge", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--memory-use-position", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--memory-use-position", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
         "--memory-position-mode",
         choices=["legacy", "none", "chunk_rope", "byte_alibi"],
-        default="legacy",
+        default="none",
     )
     parser.add_argument("--memory-residual-scale", type=float, default=0.1)
     parser.add_argument("--memory-context-norm", choices=["none", "layernorm"], default="none")
@@ -1721,19 +1721,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--boundary-mode",
         choices=["threshold", "confidence_threshold", "marginal_rate_topk", "uniform_budget", "uniform_l2_blend", "uniform_confidence_blend"],
-        default="threshold",
+        default="uniform_budget",
     )
     parser.add_argument("--boundary-coding-rate-dim", type=int, default=16)
     parser.add_argument("--boundary-coding-rate-epsilon", type=float, default=1.0)
     parser.add_argument("--boundary-coding-rate-temperature", type=float, default=0.15)
-    parser.add_argument("--boundary-coding-rate-mode", choices=["exact", "diag", "l2"], default="exact")
+    parser.add_argument("--boundary-coding-rate-mode", choices=["exact", "diag", "l2"], default="diag")
     parser.add_argument("--boundary-blend-alpha", type=float, default=1.0)
     parser.add_argument("--boundary-curriculum-switch-step", type=int, default=0)
     parser.add_argument("--boundary-curriculum-transition-steps", type=int, default=0)
     parser.add_argument(
         "--boundary-curriculum-mode",
         choices=["threshold", "confidence_threshold", "marginal_rate_topk", "uniform_budget", "uniform_l2_blend", "uniform_confidence_blend"],
-        default="marginal_rate_topk",
+        default="confidence_threshold",
     )
     parser.add_argument("--boundary-curriculum-coding-rate-mode", choices=["exact", "diag", "l2"], default="diag")
     parser.add_argument("--fixed-chunk-budget", type=int, default=0)
@@ -1750,12 +1750,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--emit-controller-slot-embedding", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--reset-emit-controller", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--reset-backbone", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--max-chunks", type=int, default=64)
+    parser.add_argument("--max-chunks", type=int, default=40)
     parser.add_argument("--max-span", type=int, default=128)
     parser.add_argument("--tau-cut", type=float, default=0.9)
     parser.add_argument("--tau-trans", type=float, default=0.75)
     parser.add_argument("--boundary-temperature", type=float, default=0.15)
-    parser.add_argument("--boundary-bridge-gradient-scale", type=float, default=1.0)
+    parser.add_argument("--boundary-bridge-gradient-scale", type=float, default=0.1)
     parser.add_argument("--noise-scale", type=float, default=0.02)
     parser.add_argument("--mask-prob", type=float, default=0.05)
     parser.add_argument("--mask-span-min", type=int, default=1)
@@ -1763,7 +1763,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--completion-mask-granularity",
         choices=["chunk", "readout"],
-        default="chunk",
+        default="readout",
         help="chunk reproduces historical v3.4 runs; readout restores the v3.3 slot-local mapping",
     )
     parser.add_argument(

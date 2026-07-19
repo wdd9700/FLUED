@@ -1,5 +1,8 @@
 # FLUED: Fluid Language Unified Encoder-Decoder
 
+> **当前状态唯一事实源：[`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md)**（默认配置、
+> 证据注册表、闸门与待裁定队列；凡与历史文档冲突以该文为准）。
+
 **FLUED** is an Alethic Insight research project on tokenizer-free language interfaces.
 
 The project studies whether a raw byte stream can be translated into a compact,

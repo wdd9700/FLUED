@@ -1,5 +1,9 @@
 # AGENTS.md — FLUED Project Guide for AI Coding Agents
 
+> **单一事实源：[`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md)**——默认配置、证据注册表、闸门与待裁定队列。
+> 任何实验默认起点是 `configs/canonical_v35.json`；`tests/test_canonical_sync.py` 持续校验
+> CLI 默认值 == canonical 配置 == CURRENT_STATE.md，三处漂移会红灯。新证据落地必须原地更新 CURRENT_STATE.md 并写 changelog。
+
 > **FLUED** (FLexible Unified Encoder-Decoder): Tokenization-free learned boundary compression for language modeling.
 > Semantic units are dynamically compiled by the model during encoding, not predefined by an external tokenizer.
 
