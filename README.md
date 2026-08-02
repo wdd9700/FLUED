@@ -17,7 +17,9 @@ while preserving reversible byte-level input/output behavior?
 
 FLUED is currently published as a research archive and architecture record.  It
 contains code, experiments, failed directions, corrected evaluation protocols,
-and the current v3.4 implementation and ablation archive.
+and the versioned implementation and ablation archive.  The current mainline is
+v3.6 (KDA generation: whole-prompt compression to a single readout package);
+see `docs/CURRENT_STATE.md` for the live evidence registry.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/)
@@ -77,6 +79,8 @@ Non-claims:
 | v3.2.1 | Strict masked-source codec and paired backbone evaluation | Masked-source training produced the strongest validated latent-interface result. |
 | v3.3 | Byte-to-latent decision interface | Current architecture target for public documentation and future implementation. |
 | v3.4 | Parallel memory, marginal coding rate, position/AR probes, hard emit control | Corrected 20K tests favor normalized no-self historical memory; current-memory helps early but plateaus lower. 2026-07-16 attribution matrices: hard emit collapses capacity before the boundary switch; memory usage weight 0.05 is the first rate-distortion improvement. 2026-07-17 CBIU three rounds: learnable emit-action utility, not yet calibrated enough for boundary takeover. |
+| v3.5 | Staged freeze L0-L5 and offline counterfactual utility datasets (v3.4 wrap-up series) | Independent-decoder codec saturates (recon 0.993, two seeds); quantile budget annealing is the first smooth compression mechanism; class-level additive factor model (27 params) is the best L3 form but misses the AUC admission bar; 14-arm long-context memory ablation shows zero gain at 512-4096B. |
+| v3.6 | KDA state machine compresses the whole prompt into exactly 1 readout package | Component pretraining beats end-to-end (S0-takeover 0.189 vs e2e 0.131, e2e bridge dead); attribution: all gain from S0 dynamic boundaries (+4.4pp), 4x capacity alone zero, k in {1,4,16} indifferent; fair masked-infilling comparison: v3.6 0.149 ~ bottleneck HNet-DiT 0.142 with ~60x fewer transmitted scalars (1,536 vs ~97,000). Current default: `configs/canonical_v36.json`. |
 
 See [docs/research/FLUED_RESEARCH_RETROSPECTIVE_CN.md](docs/research/FLUED_RESEARCH_RETROSPECTIVE_CN.md)
 for the full v1-v3.3 narrative; v3.4 evidence is indexed separately below.

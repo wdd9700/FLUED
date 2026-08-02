@@ -1,8 +1,12 @@
 # AGENTS.md — FLUED Project Guide for AI Coding Agents
 
 > **单一事实源：[`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md)**——默认配置、证据注册表、闸门与待裁定队列。
-> 任何实验默认起点是 `configs/canonical_v35.json`；`tests/test_canonical_sync.py` 持续校验
-> CLI 默认值 == canonical 配置 == CURRENT_STATE.md，三处漂移会红灯。新证据落地必须原地更新 CURRENT_STATE.md 并写 changelog。
+> 任何实验默认起点是 canonical 配置（v3.6 线 `configs/canonical_v36.json` 为当前默认，`canonical_v35.json` 旧口径保留有效）；`tests/test_canonical_sync.py` 持续校验
+> CLI 默认值 == canonical 配置 == CURRENT_STATE.md（v35/v36 两线均受守卫），三处漂移会红灯。新证据落地必须原地更新 CURRENT_STATE.md 并写 changelog。
+
+> **术语注册表：[`docs/TERMS.md`](docs/TERMS.md)**——一切项目术语的唯一登记处，与 CURRENT_STATE 同级。两条长期法则：
+> 1. **原地登记**：新术语（缩写、英文造词、非日常名词）落地必须先登记 TERMS.md（原文/中文全称/一句话定义/首现/提出方/日期/状态），否则视为不存在（黑户）；
+> 2. **未注册词禁用**：写报告或回复时，凡不在 TERMS.md 的词，首次出现必须内联给出中文全称+一句话定义；英文造词必须挂中文语义锚。AI 提名的术语默认"候选"，用户点头才转正（候选→已注册，与证据状态机同构）。
 
 > **FLUED** (FLexible Unified Encoder-Decoder): Tokenization-free learned boundary compression for language modeling.
 > Semantic units are dynamically compiled by the model during encoding, not predefined by an external tokenizer.
@@ -44,7 +48,7 @@ Full project status: [README.md](README.md) · Versioned documentation: [docs/RE
 
 | File | Role |
 |------|------|
-| `flued/model.py` | `FLUEDAutoencoder` v0.4 — core model (~540 lines) |
+| `flued/model.py` | `FLUEDAutoencoder` v0.4 — legacy core model (749 lines; v3.6 mainline is `flued/v36/`) |
 | `flued/config.py` | `ModelConfig`, `TrainConfig`, `SIZE_CONFIGS`, CLI parsing |
 | `flued/data.py` | `ByteReconstructionDataset`, PAD-offset encoding (PAD=0, byte b→b+1, vocab=257) |
 | `flued/e1_stage_a.py` | E1 training loop (standalone, not using `train.py` Trainer) |
@@ -53,6 +57,10 @@ Full project status: [README.md](README.md) · Versioned documentation: [docs/RE
 | `flued/e3_downstream.py` | `FLUEDDownstream`, `BLTDownstream`, `BPEDownstream` wrappers |
 | `flued/v33/` | v3.3 codec implementation |
 | `flued/v34/` | v3.4 parallel-memory and rate/emit extension |
+| `flued/v36/` | v3.6 KDA-generation mainline model (`FLUEDV36`) |
+| `flued/hnet_repro/` | H-Net reproduction baseline (BPB 0.653 anchor) |
+| `tools/train/v3_6/train_v36.py` | v3.6 train/eval entrypoint (`--config` eats `configs/canonical_v36.json`) |
+| `tools/train/v3_6/train_s0_segmentor.py` | S0 segmentor pretraining entrypoint |
 | `tools/train/v3_4/train_v34_pos_ar_probe.py` | v3.4 train/eval entrypoint |
 | `configs/v3_4/` | v3.4 reproducible experiment matrices |
 | `results/v3.4/5k_ablation/` | Public raw logs and curve artifacts |

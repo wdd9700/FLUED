@@ -52,3 +52,6 @@ _cloud_run_*.sh
 
 # BPE standalone (binary distribution)
 bpe_baseline_standalone/
+
+# Rust build artifacts
+tools/data/evacuator/target/

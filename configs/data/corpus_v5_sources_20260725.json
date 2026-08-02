@@ -1,0 +1,221 @@
+{
+  "output_dir": "N:\\FLUED_corpus_v5_increment_20260725",
+  "reference_db": "N:\\FLUED_corpus_v4\\state\\dedupe_hashes.sqlite3",
+  "shard_gib": 4.0,
+  "max_output_gib": 300,
+  "min_free_gib": 80,
+  "validation_workers": 4,
+  "parquet_batch_size": 4096,
+  "output_batch_size": 5000,
+  "max_chunk_chars": 32768,
+  "qwen": {
+    "enabled": true,
+    "base_url": "http://127.0.0.1:1234",
+    "model": "qwen/qwen3.5-9b",
+    "workers": 4,
+    "batch_size": 1,
+    "max_reviews": 50000,
+    "max_reviews_per_source": 10000,
+    "timeout": 60,
+    "audit_fraction": 0.00005
+  },
+  "sources": [
+    {
+      "name": "fineweb_edu_2025_08",
+      "category": "web_edu",
+      "kind": "parquet",
+      "root": "W:\\incoming\\fineweb-edu-2025-08",
+      "pattern": "**/*.parquet",
+      "text_field": "text",
+      "priority": 10,
+      "sample_rate": 0.5,
+      "max_output_gib": 35,
+      "language_score_min": 0.8,
+      "edu_score_min": 3,
+      "qwen_review": false,
+      "license_status": "ODC-By-1.0 + Common Crawl Terms of Use",
+      "source_url": "https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu",
+      "notes": "15 complete parquet shards; .incomplete cache objects are excluded; attribution and Common Crawl terms must ship with the corpus manifest"
+    },
+    {
+      "name": "fineweb_edu_2024_51",
+      "category": "web_edu",
+      "kind": "parquet",
+      "root": "W:\\incoming\\fineweb-edu",
+      "pattern": "**/*.parquet",
+      "text_field": "text",
+      "priority": 20,
+      "sample_rate": 0.45,
+      "max_output_gib": 75,
+      "language_score_min": 0.8,
+      "edu_score_min": 3,
+      "qwen_review": false,
+      "license_status": "ODC-By-1.0 + Common Crawl Terms of Use",
+      "source_url": "https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu"
+    },
+    {
+      "name": "fineweb_2024_51",
+      "category": "web",
+      "kind": "parquet",
+      "root": "W:\\incoming\\fineweb",
+      "pattern": "**/*.parquet",
+      "text_field": "text",
+      "priority": 30,
+      "sample_rate": 0.18,
+      "max_output_gib": 175,
+      "language_score_min": 0.82,
+      "qwen_review": false,
+      "license_status": "ODC-By-1.0 + Common Crawl Terms of Use",
+      "source_url": "https://huggingface.co/datasets/HuggingFaceFW/fineweb",
+      "notes": "Processed after FineWeb-Edu so overlapping documents keep the higher-quality source"
+    },
+    {
+      "name": "github_code_permissive",
+      "category": "code",
+      "kind": "parquet",
+      "root": "X:\\incoming\\github-code",
+      "pattern": "**/*.parquet",
+      "text_field": "content",
+      "priority": 40,
+      "sample_rate": 0.25,
+      "max_output_gib": 75,
+      "min_chars": 80,
+      "code": true,
+      "qwen_review": false,
+      "license_status": "per_record_permissive_filter",
+      "source_url": "https://huggingface.co/datasets/codeparrot/github-code",
+      "notes": "Only valid parquet shards; vendored/generated paths, secrets, minified files and non-permissive licenses are excluded"
+    },
+    {
+      "name": "y_oasst2",
+      "category": "dialogue",
+      "kind": "jsonl_gz",
+      "root": "Y:\\v11\\oasst2",
+      "pattern": "*.jsonl.gz",
+      "text_field": "text",
+      "exclude_if_true": ["deleted"],
+      "priority": 1,
+      "max_output_gib": 2,
+      "license_status": "Apache-2.0",
+      "source_url": "https://huggingface.co/datasets/OpenAssistant/oasst2"
+    },
+    {
+      "name": "y_qasc",
+      "category": "stem",
+      "kind": "jsonl_gz",
+      "root": "Y:\\v11\\qasc",
+      "pattern": "*.jsonl.gz",
+      "json_formatter": "qasc",
+      "priority": 2,
+      "max_output_gib": 1,
+      "license_status": "CC-BY-4.0",
+      "source_url": "https://huggingface.co/datasets/allenai/qasc"
+    },
+    {
+      "name": "y_hotpot_qa",
+      "category": "stem",
+      "kind": "jsonl_gz",
+      "root": "Y:\\v11\\hotpot_qa",
+      "pattern": "*.jsonl.gz",
+      "json_formatter": "hotpot_qa",
+      "priority": 3,
+      "max_output_gib": 3,
+      "license_status": "CC-BY-SA-4.0",
+      "source_url": "https://huggingface.co/datasets/hotpotqa/hotpot_qa"
+    },
+    {
+      "name": "y_squad",
+      "category": "stem",
+      "kind": "jsonl_gz",
+      "root": "Y:\\v11\\squad",
+      "pattern": "*.jsonl.gz",
+      "json_formatter": "squad",
+      "priority": 4,
+      "max_output_gib": 1,
+      "license_status": "CC-BY-SA-4.0",
+      "source_url": "https://huggingface.co/datasets/rajpurkar/squad"
+    },
+    {
+      "name": "y_databricks_dolly",
+      "category": "dialogue",
+      "kind": "jsonl_gz",
+      "root": "Y:\\v11\\databricks-dolly",
+      "pattern": "*.jsonl.gz",
+      "json_formatter": "dolly",
+      "priority": 5,
+      "max_output_gib": 1,
+      "license_status": "CC-BY-SA-3.0",
+      "source_url": "https://huggingface.co/datasets/databricks/databricks-dolly-15k"
+    },
+    {
+      "name": "y_boolq",
+      "category": "stem",
+      "kind": "jsonl_gz",
+      "root": "Y:\\v11\\boolq",
+      "pattern": "*.jsonl.gz",
+      "json_formatter": "boolq",
+      "priority": 6,
+      "max_output_gib": 1,
+      "license_status": "CC-BY-SA-3.0",
+      "source_url": "https://huggingface.co/datasets/google/boolq"
+    },
+    {
+      "name": "y_arc_easy",
+      "category": "stem",
+      "kind": "jsonl_gz",
+      "root": "Y:\\v11\\ARC-easy",
+      "pattern": "*.jsonl.gz",
+      "json_formatter": "arc",
+      "priority": 7,
+      "max_output_gib": 1,
+      "license_status": "CC-BY-SA-4.0",
+      "source_url": "https://huggingface.co/datasets/allenai/ai2_arc"
+    }
+  ],
+  "excluded_sources": [
+    {
+      "path": "Y:\\v11\\C4-en",
+      "reason": "progress_v12 done=false; 243.8GiB partial gzip"
+    },
+    {
+      "path": "Y:\\v11\\Falcon-RefinedWeb",
+      "reason": "download log records failure; partial gzip"
+    },
+    {
+      "path": "Y:\\v11\\codeparrot-github",
+      "reason": "download incomplete and overlaps X github-code"
+    },
+    {
+      "path": "Y:\\v11\\multilingual-cc",
+      "reason": "already fully consumed into corpus_v4"
+    },
+    {
+      "path": "Y:\\v11\\arxiv-summarization",
+      "reason": "already fully consumed into corpus_v4"
+    },
+    {
+      "path": "Y:\\v11\\zhihu-kol",
+      "reason": "sample contains irreversible replacement-character mojibake"
+    },
+    {
+      "path": "Y:\\v11\\firefly-zh",
+      "reason": "sample contains irreversible replacement-character mojibake"
+    },
+    {
+      "path": "Y:\\v11\\math-shepherd",
+      "reason": "step markers and labels contain systematic mojibake"
+    },
+    {
+      "path": "Y:\\v11\\NuminaMath-CoT",
+      "reason": "download log records out-of-memory failure and only a tiny partial output"
+    },
+    {
+      "path": "Y:\\temp_hf_dl",
+      "reason": "temporary download fragments are never corpus inputs"
+    },
+    {
+      "path": "Y:\\v11\\transformers-code; Y:\\v11\\codealpaca; Y:\\v11\\code-contests",
+      "reason": "code instruction corpora lack per-record permissive-license provenance and are excluded from the strict code pipeline"
+    }
+  ]
+}
