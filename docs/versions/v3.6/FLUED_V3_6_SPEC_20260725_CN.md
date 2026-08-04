@@ -456,3 +456,48 @@ unmasked/PPL 证据一锤定音——通道曾是检索瓶颈，逐段条件化�
 全位置 acc 0.351 对比 HNet-DiT 瓶颈臂 0.492@97K、masked 0.141 对 0.142@97K，
 RD 前沿上仍 ~3.6× 便宜。归因裁定与 canonical 切换（v36.2?）待用户。
 归档已带 manifest。
+
+**用户后续裁定（2026-08-02）**：① masked 补全为必备项，不降级（口径归因
+讨论关闭）；② S0.7 不设默认，`per_chunk_readout` 保持默认关（canonical 维持
+v36.1）；③ 新条件化下 GRPO 是否重跑，待另行裁定。
+
+## 18. 2026-08-02 预注册：S0.8 DiT summarizer 前后对比（用户裁决恢复字面形态）
+
+**背景**：口径考古确认 summarizer 在代码史中从未是 DiT（用户心智源自 v3.1 doctrine
+与 v3.4 的双 DiT 组件记忆，详见 §16 与当日调查报告）；用户裁决：**不按类比处理，
+直接把 summarizer 改成字面 one-shot DiT**（新 `summarizer_type="dit"`：
+DiTStyleBlock×2 逐段并行 + 掩码均值池 + FFN，5.06M vs slot 版 2.55M；
+canonical 默认仍为 `"slot"`），并**用原实验条件重测对比**。
+
+**两臂（协议与对应原臂逐项一致：从零消融、同数据/种子/eval、20K 步）**：
+- D0 = A0 条件（均值通道）+ DiT summarizer，对照 A0（0.1903/0.1540/33.9）；
+- D7 = S0.7 条件（per_chunk_readout）+ DiT summarizer，对照 S0.7
+  （0.3507/0.1413/12.1）。
+
+**判定**（见结果后不改，2pp 阈值）：DiT 相对 slot 同条件 Δ≥+2pp（任一主指标）
+= projector 形态曾是隐藏瓶颈，summarizer 形态升级进 canonical 讨论；全部 |Δ|<2pp
+= slot projector 与 DiT 等效，形态问题关闭（维持 slot 默认，省 2.5M 参数）。
+**尺寸分析工作项（本节前先行登记，结论随 D0/D7 一并交付）**：① interpreter 参数
+构成——KDA 递推本身零参数（alpha_logit+readout_query 仅 1,024），state_machine
+的 3.94M 几乎全是 readout realign MLP；write_head 2.11M 单层 trunk 扩张
+512→1,544 门控值/段，疑似比状态机更可能卡准确性；② backbone 4.76M 在 S0.7 上
+direct≈backbone（0.3497 vs 0.3507），通道打开前主干零贡献——"主干过小"在通道
+打开后是否成为新约束，需要 backbone 容量臂（3L→6L、ffn 2048，d_backbone=384
+因共享字节表锁定）验证；③ 边际拐点判读：全部容量旋钮（summarizer 三因子、
+状态 4×、k）边际零效应 vs 唯一结构改造（S0.7）+16pp——项目不是全面过了边际
+拐点，而是容量边际零、结构边际正；S0.7 后 backbone/写入头容量臂才首次值得测。
+归档 `L:\FLUED_archive\s08_dit_summarizer_20260802`（跑完补 manifest）。
+
+**S0.8 结果（2026-08-05，双臂完成）**：
+- D0（均值通道 + DiT）：0.1950/0.1527/32.1 vs A0 0.1903/0.1540/33.9——全部 |Δ|<2pp，
+  均值通道下形态无关（通道卡死一切，下游什么都摸不到）；
+- D7（逐段条件化 + DiT）：**unmasked 0.5491 / PPL 5.81** vs S0.7 slot 0.3507/12.12——
+  **+19.8pp、PPL 再腰斩**；masked 0.1428 持平（与口径一致：masked 测推断非检索）。
+- **判定：projector 形态确实是隐藏瓶颈——但只在通道打开后才显形**（串联瓶颈的
+  遮蔽效应：均值通道是第一瓶颈时，summarizer 形态好坏摸不到差异；逐段条件化
+  打通后，slot projector 的欠训/欠表达立刻成为新瓶颈）。用户直觉（summarizer
+  是瓶颈）部分平反：它是第二瓶颈，不是第一瓶颈。
+- **RD 前沿含义**：D7 全位置 0.549 @ ~27K 标量 **反超 HNet-DiT 瓶颈臂 0.492@97K**，
+  且便宜 3.6×（无压缩参照 0.968@262K 仍远）；masked 0.143@27K ≈ 0.142@97K。
+- 守卫：overflow/truncated 全 0；D7 有 1 次 NaN skip（bf16 瞬时，K4 前科同类，
+  稳定性工作项记录）；state_norm 5.63 健康。

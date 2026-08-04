@@ -138,3 +138,27 @@ def test_per_chunk_readout_backward_reaches_core():
     for prefix in ["summarizer", "write_head", "state_machine", "backbone", "decoder"]:
         grads = [p.grad for n, p in model.named_parameters() if n.startswith(prefix)]
         assert any(g is not None and g.abs().sum() > 0 for g in grads), prefix
+
+
+def test_dit_summarizer_shapes_finite_backward():
+    torch.manual_seed(0)
+    model = FLUEDV36(tiny_config(summarizer_type="dit", summarizer_dit_layers=2))
+    model.train()
+    ids = torch.randint(1, 258, (2, 32))
+    out = model(ids)
+    assert out.memory.shape == (2, 4, 96)  # (B, C, d_mem)
+    assert out.logits_direct.shape == (2, 4, 8, 258)
+    assert torch.isfinite(out.logits_direct).all()
+    assert torch.isfinite(out.memory).all()
+    (out.logits_direct.square().mean() + out.logits_backbone.square().mean()).backward()
+    grads = [p.grad for n, p in model.named_parameters() if n.startswith("summarizer")]
+    assert any(g is not None and g.abs().sum() > 0 for g in grads)
+
+
+def test_dit_summarizer_per_chunk_readout_combo():
+    torch.manual_seed(0)
+    model = FLUEDV36(tiny_config(summarizer_type="dit", per_chunk_readout=True))
+    ids = torch.randint(1, 258, (2, 32))
+    out = model(ids)
+    assert out.package.shape == (2, 4, 1, 64)
+    assert torch.isfinite(out.logits_backbone).all()

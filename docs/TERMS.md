@@ -134,6 +134,8 @@
 | 率失真前沿 | 率失真前沿（RD frontier） | 以传输标量总量为率、任务指标为失真的多模型对比曲线；v3.6 的判决口径（前沿对前沿，不比单点） | v3.6 规格 §4/§12 | 用户 | 2026-07-25 | 已注册 |
 | readout 包均值瓶颈 | readout 包均值瓶颈（package-mean bottleneck） | v36 实现中整条 prompt 的 readout 包经 mean(dim=1) 压成单条件向量、全局 span decoder 跨段区分仅靠 chunk_pos 位置嵌入的信息瓶颈 | v3.6 规格 §13 | AI(Kimi) | 2026-08-02 | 候选 |
 | 逐段条件化 | 逐段条件化（per-chunk conditioning） | decoder 按段从压缩状态读出各自条件向量、替代"全 prompt 均值+位置嵌入"广播的改造方向；治 readout 包均值瓶颈，代价是传输标量随段数上升 | v3.6 规格 §15/§16 | AI(Kimi) | 2026-08-02 | 候选 |
+| byte embedder | 字节嵌入器（byte embedder） | byte_lookup + encoder_blocks 的合称：字节→字节态的前端嵌入（原称 byte encoder；用户裁定改名——它不做语义编码，只是嵌入+上下文整理） | 用户指令 2026-08-05 | 用户 | 2026-08-05 | 已注册 |
+| 下游污染 | 下游污染（downstream contamination） | 旧 S0 权重（4B 教师粗粒度标签训练）被冻结继承进所有后续 run，使其实验结果只能用于归因、不能作为新 S0′ 起点的现象 | 用户指令 2026-08-05 | 用户 | 2026-08-05 | 已注册 |
 
 ## 8. Changelog
 
@@ -150,3 +152,6 @@
 - 2026-08-02：canonical 基线条目定义更新为双 canonical 口径（v36 当前默认/v35 保留）；
   新增候选术语 readout 包均值瓶颈（package-mean bottleneck，AI 提名待转正）。
 - 2026-08-02：新增候选术语逐段条件化（per-chunk conditioning，AI 提名待转正）。
+- 2026-08-05：用户提名直接转正两条：byte embedder（字节嵌入器，byte_lookup+
+  encoder_blocks 的合称，取代 byte encoder 称谓）、下游污染（downstream
+  contamination，旧 S0 权重产物只可用于归因、不可作新 S0′ 起点）。

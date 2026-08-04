@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import time
@@ -35,6 +36,13 @@ RULES = """你是语义切分标注员。唯一任务：在文本中插入半角
 8. 代码与对话标记（```、函数签名、[Human]:、<eoh> 等）保持原样：在语句/逻辑行之间切，绝不在一行代码内部切。"""
 
 
+_QUOTE_RULES = RULES
+
+
+def _rules() -> str:
+    return _QUOTE_RULES
+
+
 def parse_exemplars(path: Path, max_exemplars: int) -> list[tuple[str, str]]:
     text = path.read_text(encoding="utf-8")
     blocks = re.split(r"### 样本\d+（语料 [\d]+% 处）\n", text)[1:]
@@ -52,21 +60,27 @@ def build_prompt(exemplars: list[tuple[str, str]], target: str) -> list[dict]:
     shots = []
     for i, (raw, annotated) in enumerate(exemplars, 1):
         shots.append(f"【范本{i}输入】\n{raw}\n【范本{i}输出】\n{annotated}")
-    system = RULES + "\n\n以下是人工标注范本，严格模仿其切分风格与粒度：\n\n" + "\n\n".join(shots)
+    system = _rules() + "\n\n以下是人工标注范本，严格模仿其切分风格与粒度：\n\n" + "\n\n".join(shots)
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": f"【待标注输入】\n{target}\n【待标注输出】\n"},
     ]
 
 
-def call_teacher(endpoint: str, model: str, messages: list[dict], timeout: int) -> str:
-    payload = json.dumps(
-        {"model": model, "messages": messages, "temperature": 0.0, "max_tokens": 3072}
-    ).encode("utf-8")
+def call_teacher(endpoint: str, model: str, messages: list[dict], timeout: int, api_key: str = "") -> str:
+    body: dict = {"model": model, "messages": messages, "max_tokens": 16384}
+    if os.environ.get("S0_TEACHER_TEMPERATURE"):
+        body["temperature"] = float(os.environ["S0_TEACHER_TEMPERATURE"])
+    if os.environ.get("S0_TEACHER_NO_THINKING"):
+        body["thinking"] = {"type": "disabled"}
+    payload = json.dumps(body).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(
         endpoint.rstrip("/") + "/chat/completions",
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -105,7 +119,7 @@ def build_prompt_json(exemplars: list[tuple[str, str]], target: str) -> list[dic
     for i, (raw, annotated) in enumerate(exemplars, 1):
         segs = [s for s in annotated.split("|") if s]
         shots.append(f"【范本{i}输入】\n{raw}\n【范本{i}输出】\n{json.dumps(segs, ensure_ascii=False)}")
-    system = RULES + "\n\n" + JSON_INSTR + "\n\n以下是人工标注范本，严格模仿其切分风格与粒度：\n\n" + "\n\n".join(shots)
+    system = _rules() + "\n\n" + JSON_INSTR + "\n\n以下是人工标注范本，严格模仿其切分风格与粒度：\n\n" + "\n\n".join(shots)
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": f"【待标注输入】\n{target}\n【待标注输出】\n"},
@@ -143,20 +157,26 @@ def validate_json_mode(target: str, output: str) -> list[int] | None:
 
 
 def sample_candidates(corpus: Path, count: int, seed: int) -> list[dict]:
-    size = corpus.stat().st_size
+    # corpus may be a single file or a directory of text shards
+    if corpus.is_dir():
+        files = sorted(corpus.glob("*.txt"))
+    else:
+        files = [corpus]
+    sizes = [(f, f.stat().st_size) for f in files]
     rng = random.Random(seed)
     rows = []
-    with corpus.open("rb") as fh:
-        while len(rows) < count:
-            frac = rng.uniform(0.0, 0.94)
+    while len(rows) < count:
+        fh_path, size = rng.choice(sizes)
+        frac = rng.uniform(0.0, 0.94)
+        with fh_path.open("rb") as fh:
             fh.seek(int(size * frac))
             block = fh.read(65536).decode("utf-8", errors="ignore")
-            lines = [l.strip() for l in block.split("\n") if l.strip()]
-            if len(lines) < 3:
-                continue
-            text = "\n".join(lines[1:4])
-            if 120 <= len(text) <= 600 and not text.startswith("{") and "�" not in text:
-                rows.append({"offset_frac": round(frac, 6), "text": text})
+        lines = [l.strip() for l in block.split("\n") if l.strip()]
+        if len(lines) < 3:
+            continue
+        text = "\n".join(lines[1:4])
+        if 120 <= len(text) <= 600 and not text.startswith("{") and "�" not in text:
+            rows.append({"offset_frac": round(frac, 6), "shard": fh_path.name, "text": text})
     return rows
 
 
@@ -168,15 +188,17 @@ def label_one(
     model: str,
     timeout: int,
     output_mode: str = "marks",
+    api_key: str = "",
+    attempts: int = 2,
 ) -> tuple[dict | None, dict | None]:
     target = cand["text"]
     boundaries = None
     last_output = ""
     prompt_fn = build_prompt_json if output_mode == "json" else build_prompt
     validate_fn = validate_json_mode if output_mode == "json" else validate_and_convert
-    for _attempt in range(2):
+    for _attempt in range(attempts):
         try:
-            last_output = call_teacher(endpoint, model, prompt_fn(exemplars, target), timeout)
+            last_output = call_teacher(endpoint, model, prompt_fn(exemplars, target), timeout, api_key)
         except Exception as exc:
             last_output = f"__error__ {exc}"
         boundaries = validate_fn(target, last_output)
@@ -191,7 +213,9 @@ def label_one(
         prev = b
     record = {
         "index": index,
+        "retry_of": cand.get("retry_index"),
         "offset_frac": cand["offset_frac"],
+        "shard": cand.get("shard", ""),
         "text": target,
         "boundaries_bytes": boundaries,
         "n_segments": len(seg_bytes),
@@ -206,6 +230,10 @@ def main() -> None:
     parser.add_argument("--samples-file", required=True)
     parser.add_argument("--corpus", required=True)
     parser.add_argument("--endpoint", default="http://localhost:1234/v1")
+    parser.add_argument("--api-key-file", default="", help="optional Bearer token file (e.g. Moonshot API key); never committed")
+    parser.add_argument("--rules-file", default="", help="optional markdown rules file replacing the inline RULES (e.g. S05_TEACHER_RULES_CN.md)")
+    parser.add_argument("--retry-file", default="", help="failures JSONL from a previous run; re-label those texts instead of sampling the corpus")
+    parser.add_argument("--attempts", type=int, default=2, help="label attempts per sample before giving up")
     parser.add_argument("--model", required=True)
     parser.add_argument("--count", type=int, default=5000)
     parser.add_argument("--max-exemplars", type=int, default=12)
@@ -219,6 +247,10 @@ def main() -> None:
 
     exemplars = parse_exemplars(Path(cli.samples_file), cli.max_exemplars)
     print(f"[s0] exemplars={len(exemplars)}")
+    if cli.rules_file:
+        global _QUOTE_RULES
+        _QUOTE_RULES = Path(cli.rules_file).read_text(encoding="utf-8")
+        print(f"[s0] rules file: {cli.rules_file} ({len(_QUOTE_RULES)} chars)")
     if cli.dry_run:
         prompt = build_prompt(exemplars, "<示例目标文本>")
         print(prompt[0]["content"][:2000])
@@ -227,7 +259,15 @@ def main() -> None:
 
     out_dir = Path(cli.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    candidates = sample_candidates(Path(cli.corpus), cli.count, cli.seed)
+    api_key = Path(cli.api_key_file).read_text(encoding="utf-8").strip() if cli.api_key_file else ""
+    if cli.retry_file:
+        candidates = [
+            {"offset_frac": 0.0, "shard": "", "text": r["text"], "retry_index": r.get("index")}
+            for r in (json.loads(l) for l in Path(cli.retry_file).read_text(encoding="utf-8").splitlines() if l.strip())
+        ]
+        print(f"[s0] retry candidates={len(candidates)} from {cli.retry_file}")
+    else:
+        candidates = sample_candidates(Path(cli.corpus), cli.count, cli.seed)
     ds_path = out_dir / "s0_teacher_labels.jsonl"
     spot_path = out_dir / "s0_spot_check.txt"
     fail_path = out_dir / "s0_failures.jsonl"
@@ -238,7 +278,7 @@ def main() -> None:
     with ds_path.open("w", encoding="utf-8") as sink, fail_path.open("w", encoding="utf-8") as fsink:
         with ThreadPoolExecutor(max_workers=cli.workers) as pool:
             futures = {
-                pool.submit(label_one, i, cand, exemplars, cli.endpoint, cli.model, cli.timeout, cli.output_mode): i
+                pool.submit(label_one, i, cand, exemplars, cli.endpoint, cli.model, cli.timeout, cli.output_mode, api_key, cli.attempts): i
                 for i, cand in enumerate(candidates)
             }
             for future in as_completed(futures):

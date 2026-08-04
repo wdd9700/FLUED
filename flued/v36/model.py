@@ -63,6 +63,8 @@ class V36Config:
     boundary_bridge_gradient_scale: float = 0.1
     max_positions: int = 64
     per_chunk_readout: bool = False
+    summarizer_type: str = "slot"
+    summarizer_dit_layers: int = 2
 
 
 @dataclass
@@ -103,6 +105,37 @@ class ChunkSummarizer(nn.Module):
         attn = score.softmax(dim=-1)
         pooled = torch.einsum("bcst,bctd->bcsd", attn, v)
         return self.ffn(pooled.reshape(bsz, chunks, -1))
+
+
+class DiTChunkSummarizer(nn.Module):
+    """Literal one-shot DiT summarizer: DiTStyleBlock stack over each chunk's
+    span (chunks processed in parallel and independently), masked mean pool,
+    FFN to one memory vector per chunk. Matches the user's original mental
+    model; `slot` (ChunkSummarizer) remains the canonical default.
+    """
+
+    def __init__(self, c: V36Config) -> None:
+        super().__init__()
+        self.blocks = nn.ModuleList(
+            [DiTStyleBlock(c.d_byte, c.nhead, c.ffn_dim, True, False) for _ in range(c.summarizer_dit_layers)]
+        )
+        self.ffn = nn.Sequential(
+            nn.LayerNorm(c.d_byte),
+            nn.Linear(c.d_byte, c.summarizer_hidden),
+            nn.SiLU(),
+            nn.Linear(c.summarizer_hidden, c.d_mem),
+        )
+
+    def forward(self, spans: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
+        bsz, chunks, span, dim = spans.shape
+        h = spans.reshape(bsz * chunks, span, dim)
+        valid = token_mask.reshape(bsz * chunks, span)
+        noise = h.new_zeros(h.size(0))
+        for block in self.blocks:
+            h = block(h, valid, noise)
+        denom = valid.sum(dim=1, keepdim=False).clamp(min=1).unsqueeze(-1).to(h.dtype)
+        pooled = (h * valid.unsqueeze(-1).to(h.dtype)).sum(dim=1) / denom
+        return self.ffn(pooled).view(bsz, chunks, -1)
 
 
 class WriteHead(nn.Module):
@@ -242,7 +275,7 @@ class FLUEDV36(nn.Module):
         )
         self.segmentor_head = nn.Sequential(nn.LayerNorm(c.d_byte), nn.Linear(c.d_byte, 1))
         self.chunk_builder = ChunkBuilder(c.max_chunks, c.max_span)
-        self.summarizer = ChunkSummarizer(c)
+        self.summarizer = ChunkSummarizer(c) if c.summarizer_type == "slot" else DiTChunkSummarizer(c)
         self.write_head = WriteHead(c)
         self.state_machine = KDAStateMachine(c)
         self.backbone = TinyBackbone(c)

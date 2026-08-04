@@ -77,6 +77,8 @@ def build_model(args: Namespace) -> FLUEDV36:
             boundary_bridge_gradient_scale=args.boundary_bridge_gradient_scale,
             max_positions=args.max_positions,
             per_chunk_readout=args.per_chunk_readout,
+            summarizer_type=args.summarizer_type,
+            summarizer_dit_layers=args.summarizer_dit_layers,
         )
     )
 
@@ -197,6 +199,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--boundary-bridge-gradient-scale", type=float, default=0.1)
     parser.add_argument("--max-positions", type=int, default=64)
     parser.add_argument("--per-chunk-readout", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--summarizer-type", choices=["slot", "dit"], default="slot")
+    parser.add_argument("--summarizer-dit-layers", type=int, default=2)
     parser.add_argument("--mask-prob", type=float, default=0.05)
     parser.add_argument("--mask-span-min", type=int, default=1)
     parser.add_argument("--mask-span-max", type=int, default=8)
