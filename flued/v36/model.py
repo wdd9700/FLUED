@@ -62,6 +62,7 @@ class V36Config:
     boundary_temperature: float = 0.15
     boundary_bridge_gradient_scale: float = 0.1
     max_positions: int = 64
+    per_chunk_readout: bool = False
 
 
 @dataclass
@@ -155,15 +156,24 @@ class KDAStateMachine(nn.Module):
         alpha = gates["alpha"][0].unsqueeze(0).unsqueeze(-1)
         mask5 = chunk_mask.float().view(bsz, chunks, 1, 1, 1)
         alpha_eff = 1.0 - mask5 + mask5 * alpha
+        q = self.readout_query.float()
+        per_chunk_reads = []
         for i in range(chunks):
             ki, vi, bi, ai = kf[:, i], vf[:, i], beta[:, i], alpha_eff[:, i]
             state = ai * state
             kTs = torch.einsum("bhk,bhkv->bhv", ki, state)
             state = state - bi.view(bsz, heads, 1, 1) * ki.unsqueeze(-1) * kTs.unsqueeze(-2)
             state = state + bi.view(bsz, heads, 1, 1) * ki.unsqueeze(-1) * vi.unsqueeze(-2)
-        q = self.readout_query.float()
-        read = torch.einsum("qhk,bhkv->bqhv", q, state)
-        read = read.reshape(bsz, q.size(0), heads * dv).to(k.dtype)
+            if self.c.per_chunk_readout:
+                # Read the state right after consuming chunk i: each chunk gets
+                # its own conditioning vector instead of the whole-prompt mean.
+                per_chunk_reads.append(torch.einsum("qhk,bhkv->bqhv", q, state))
+        if self.c.per_chunk_readout:
+            read = torch.stack(per_chunk_reads, dim=1)  # (B, C, q, heads*dv)
+            read = read.reshape(bsz, chunks, q.size(0), heads * dv).to(k.dtype)
+        else:
+            read = torch.einsum("qhk,bhkv->bqhv", q, state)
+            read = read.reshape(bsz, q.size(0), heads * dv).to(k.dtype)
         package = self.realign(read)
         return package, state.norm(dim=(-2, -1)).mean()
 
@@ -289,11 +299,20 @@ class FLUEDV36(nn.Module):
         memory = self.summarizer(chunks.span_embeddings, chunks.token_mask)
         gates = self.write_head(memory)
         package, state_norm = self.state_machine(gates, chunks.chunk_mask)
-        backbone_out = self.backbone(package)
-        n_chunks = chunks.chunk_mask.size(1)
-        pos = self.chunk_pos.weight.unsqueeze(0)[:, :n_chunks]
-        cond_direct = self.decoder_in(package.mean(dim=1)).unsqueeze(1) + pos
-        cond_backbone = backbone_out.mean(dim=1).unsqueeze(1) + pos
+        if self.config.per_chunk_readout:
+            # package: (B, C, q, d_pack) — one conditioning vector per chunk.
+            content = package.mean(dim=2)
+            backbone_out = self.backbone(content)
+            n_chunks = chunks.chunk_mask.size(1)
+            pos = self.chunk_pos.weight.unsqueeze(0)[:, :n_chunks]
+            cond_direct = self.decoder_in(content) + pos
+            cond_backbone = backbone_out + pos
+        else:
+            backbone_out = self.backbone(package)
+            n_chunks = chunks.chunk_mask.size(1)
+            pos = self.chunk_pos.weight.unsqueeze(0)[:, :n_chunks]
+            cond_direct = self.decoder_in(package.mean(dim=1)).unsqueeze(1) + pos
+            cond_backbone = backbone_out.mean(dim=1).unsqueeze(1) + pos
         logits_direct = self.decoder(cond_direct, chunks.token_mask)
         logits_backbone = self.decoder(cond_backbone, chunks.token_mask)
         aux = {

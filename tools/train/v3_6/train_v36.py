@@ -76,6 +76,7 @@ def build_model(args: Namespace) -> FLUEDV36:
             boundary_temperature=args.boundary_temperature,
             boundary_bridge_gradient_scale=args.boundary_bridge_gradient_scale,
             max_positions=args.max_positions,
+            per_chunk_readout=args.per_chunk_readout,
         )
     )
 
@@ -195,6 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--boundary-temperature", type=float, default=0.15)
     parser.add_argument("--boundary-bridge-gradient-scale", type=float, default=0.1)
     parser.add_argument("--max-positions", type=int, default=64)
+    parser.add_argument("--per-chunk-readout", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--mask-prob", type=float, default=0.05)
     parser.add_argument("--mask-span-min", type=int, default=1)
     parser.add_argument("--mask-span-max", type=int, default=8)
@@ -211,6 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-optimizer", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--init-checkpoint", default="")
+    parser.add_argument("--init-prefixes", default="", help="comma-separated; only load matching prefixes from init checkpoint (rest stays freshly initialized)")
     parser.add_argument("--freeze-prefixes", default="")
     return parser
 
@@ -240,9 +243,14 @@ def main() -> None:
         compatible = {
             k: v for k, v in payload["model"].items() if k in current and current[k].shape == v.shape
         }
+        init_prefixes = [p.strip() for p in args.init_prefixes.split(",") if p.strip()]
+        if init_prefixes:
+            compatible = {
+                k: v for k, v in compatible.items() if any(k.startswith(p) for p in init_prefixes)
+            }
         model.load_state_dict(compatible, strict=False)
         print(
-            f"[v36] init from {args.init_checkpoint}: loaded={len(compatible)} skipped={len(payload['model']) - len(compatible)}",
+            f"[v36] init from {args.init_checkpoint}: loaded={len(compatible)} skipped={len(payload['model']) - len(compatible)} prefixes={init_prefixes or 'ALL'}",
             flush=True,
         )
     frozen = [p.strip() for p in args.freeze_prefixes.split(",") if p.strip()]

@@ -133,6 +133,7 @@
 | HNet-DiT | HNet-DiT（DiT 化 H-Net 对照组） | 我方改造的 H-Net 变体：双向注意力+masked infilling 统一口径，用于与 v3.6 同任务公平对比；分标准臂（byte 旁路天花板）与瓶颈臂（砍旁路） | v3.6 规格 §12 | AI(K3)+用户 | 2026-08-02 | 已注册 |
 | 率失真前沿 | 率失真前沿（RD frontier） | 以传输标量总量为率、任务指标为失真的多模型对比曲线；v3.6 的判决口径（前沿对前沿，不比单点） | v3.6 规格 §4/§12 | 用户 | 2026-07-25 | 已注册 |
 | readout 包均值瓶颈 | readout 包均值瓶颈（package-mean bottleneck） | v36 实现中整条 prompt 的 readout 包经 mean(dim=1) 压成单条件向量、全局 span decoder 跨段区分仅靠 chunk_pos 位置嵌入的信息瓶颈 | v3.6 规格 §13 | AI(Kimi) | 2026-08-02 | 候选 |
+| 逐段条件化 | 逐段条件化（per-chunk conditioning） | decoder 按段从压缩状态读出各自条件向量、替代"全 prompt 均值+位置嵌入"广播的改造方向；治 readout 包均值瓶颈，代价是传输标量随段数上升 | v3.6 规格 §15/§16 | AI(Kimi) | 2026-08-02 | 候选 |
 
 ## 8. Changelog
 
@@ -148,3 +149,4 @@
 - 2026-08-02：登记 NLA/GRPO/S0·S0.5/FlashKDA/HNet-DiT/率失真前沿。
 - 2026-08-02：canonical 基线条目定义更新为双 canonical 口径（v36 当前默认/v35 保留）；
   新增候选术语 readout 包均值瓶颈（package-mean bottleneck，AI 提名待转正）。
+- 2026-08-02：新增候选术语逐段条件化（per-chunk conditioning，AI 提名待转正）。

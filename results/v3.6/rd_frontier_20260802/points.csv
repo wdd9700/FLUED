@@ -1,0 +1,9 @@
+label,rate_scalars,masked_acc,group,source_archive_dir (under L:/FLUED_archive/)
+v3.6 k=1 (S0+4x),1536,0.148495,v36,v36_s0_vs_e2e_20260727/arm_a_s0
+v3.6 k=4,6144,0.146253,v36,v36_attribution_matrix_20260731/k4_s0_4x_rerun
+v3.6 k=16,24576,0.150900,v36,v36_attribution_matrix_20260731/k16_s0_4x
+B1 uniform 4x k=1,1536,0.129296,ctx,v36_attribution_matrix_20260731/b1_uniform_4x_k1
+B0 uniform 1x k=1,384,0.127204,ctx,v36_attribution_matrix_20260731/b0_uniform_1x_k1
+legacy uniform probe,384,0.113514,ctx,v36_learnability_probe_20k_20260725
+HNet-DiT std (no compr.),262144,0.323630,hnet,hnet_dit_fair_20260802/hnet_dit_std
+HNet-DiT bottleneck,97540,0.141800,hnet,hnet_dit_fair_20260802/hnet_dit_bottleneck

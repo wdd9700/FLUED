@@ -111,3 +111,30 @@ def test_k_queries_package_width():
     out = model(ids)
     assert out.package.shape == (2, 4, 64)
     assert out.backbone_out.shape == (2, 4, 64)
+
+
+def test_per_chunk_readout_shapes_and_finite():
+    torch.manual_seed(0)
+    model = FLUEDV36(tiny_config(per_chunk_readout=True))
+    ids = torch.randint(1, 258, (2, 32))
+    out = model(ids)
+    assert out.package.shape == (2, 4, 1, 64)  # (B, C, q, d_pack)
+    assert out.backbone_out.shape == (2, 4, 64)
+    assert out.logits_direct.shape == (2, 4, 8, 258)
+    assert out.logits_backbone.shape == (2, 4, 8, 258)
+    assert torch.isfinite(out.logits_direct).all()
+    assert torch.isfinite(out.logits_backbone).all()
+    assert torch.isfinite(out.package).all()
+    assert out.aux["truncated_tokens"].sum().item() == 0
+
+
+def test_per_chunk_readout_backward_reaches_core():
+    torch.manual_seed(0)
+    model = FLUEDV36(tiny_config(per_chunk_readout=True))
+    model.train()
+    ids = torch.randint(1, 258, (2, 32))
+    out = model(ids)
+    (out.logits_direct.square().mean() + out.logits_backbone.square().mean()).backward()
+    for prefix in ["summarizer", "write_head", "state_machine", "backbone", "decoder"]:
+        grads = [p.grad for n, p in model.named_parameters() if n.startswith(prefix)]
+        assert any(g is not None and g.abs().sum() > 0 for g in grads), prefix

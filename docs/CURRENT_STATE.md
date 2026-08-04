@@ -65,6 +65,9 @@ v3.6 证据基座：S0 + A/B 对照（E17/E18）。
 | E18 | v3.6 组件预训路线优于端到端（A: 0.189/34.2 vs B: 0.131/35.9，+5.8pp 且 B 过 12K 退化；端到端桥装死全程）；4× 容量+S0 边界把 k=1 平台从 0.11 抬到 0.19-0.20 但未击穿 | 已验证（单 seed） | s0_vs_e2e 对照（2026-07-31） |
 | E19 | 增益归因：S0 动态边界 +4.4pp（全部活性成分），4× 容量单独 +0，k∈{1,4,16} 无差异（~0.19）；K4 首发 NaN 发散但同 seed 重跑干净（bf16 瞬时不稳定，列为稳定性工作项） | 已验证（单 seed） | 归因矩阵（2026-08-01） |
 | E20 | 公平对比（masked infilling 同口径）：v3.6 masked acc 0.149 ≈ 瓶颈 HNet-DiT 0.142，但信息传输 1,536 vs ~97,000 标量（~60× 效率）；HNet-DiT 两臂边界均退化（标准臂层级溶解 1 chunk、瓶颈臂切到 2.5B/段）——无显式压缩激励时动态切分无中间态 | 已验证（单 seed） | hnet_dit_fair（2026-08-02） |
+| E21 | S0.5 GRPO 边界+β 微调可行：任务奖励自选停点 hard 24.3 段≈用户 21B 粒度（教师 27B 之争了结）；率项未激活、β 未饱和、state_norm 健康；masked 与控制臂双口径打平（0.1477 vs 0.1492）、backbone −1.2pp 未过；GRPO 当前价值=选粒度非提质量 | 候选（单 seed 2K） | s05_grpo_r4_2k（2026-08-02） |
+| E22 | summarizer 容量三因子（slots 4→16 / hidden 1024→2048 / d_mem 512→1024）2³ 全因子对 masked acc 零效应（主效应 ≤0.24pp，2pp 预注册阈值）；瓶颈锁定下游 readout 包均值条件通道 | 已验证（单 seed，20K/512B 工程口径） | s05_summarizer_matrix（2026-08-02） |
+| E23 | 逐段条件化（per_chunk_readout）证明信息在 KDA 状态里：unmasked 全位置 acc 0.190→0.351（+16pp）、PPL 33.9→12.1——均值通道是检索瓶颈，路线活；但 masked 补全 0.154→0.141 未过预注册 +2pp 线（口径失当：masked 测的是从未进状态的字节，靠上下文推断非检索），归因待裁定（Q1 类） | 已验证（单 seed，20K/512B）附口径待裁定 | s07_perchunk_20k（2026-08-02） |
 
 ## 4. 闸门注册表
 
@@ -89,6 +92,7 @@ v3.6 证据基座：S0 + A/B 对照（E17/E18）。
 | Q5 | memory 长上下文消融（v3.3 串行/并行 + v3.4 并行×2 变体 × 512/2048/4096，14 臂 20K） | **已完成（2026-07-24）：全线零增益，建议关闭 memory 线，待用户裁定** |
 | Q6 | 2048/4096 长上下文 + encoder 速度（scaling 前必测）。可行性已实测（2026-07-23）：2048=max_chunks 256/stride 1024/batch 4（峰值 14.3GB，~3.6 step/s，20K≈93min）；4096=max_chunks 1024/stride 2048/batch 1（峰值 12.2GB，~2.3 step/s，20K≈2.4h）；硬闸门 cut_capacity_overflow=0 且 truncated_tokens=0（实测全 0）。注：`expandable_segments` 在本 torch 构建上不支持（启动警告），无效；有效手段是 batch 压到峰值 <15.9GB 分配器抖动红线以下 | 配置标定完成；memory 消融执行中 |
 | Q7 | 300M L0 codec（无条件安全的纯 codec 层）启动时机 | 待 Q1 裁定 |
+| Q8 | S0.5/S0.6 后岔口：decoder 逐段条件化改造（治 E22 锁定的均值通道，~半天含测试；会改变 GRPO 奖励地形，先做可避免 10K 白跑）vs GRPO 10K 续训（R4 臂 masked 趋势未封顶，便宜但可能只是在天花板下抛光） | **已裁定（2026-08-02）：先改造→S0.7 大阳性（E23）。遗留：masked 口径归因、canonical 是否切 v36.2（per_chunk_readout 默认开）、新条件化下 GRPO 是否重跑** |
 
 ## 6. Changelog
 
@@ -165,3 +169,53 @@ v3.6 证据基座：S0 + A/B 对照（E17/E18）。
   （docs/README、根 README 时间线、configs/tools/results README、TERMS §3
   canonical 条目、本文 §1）；⑤ readout 包均值瓶颈登记（v3.6 规格 §13 备注 +
   TERMS 候选术语），S0.5 GRPO 奖励设计须知。
+- 2026-08-02：S0.5 ①② 落地（仪器校准性质，不改默认）。① 从 arm_a_s0 checkpoint
+  出发 3K 步纯两任务训练存 S0.5 基线快照（eval 0.1895/33.7PPL，守卫全 0，
+  配置三方对齐修复经实战验证 loaded=322/skipped=0），归档
+  `L:\FLUED_archive\s05_baseline_3k_20260802`；② v36 CBIU 锚点离线生成
+  （新脚本 `tools/analysis/v3_6/probe_v36_cbiu_anchors.py`，动作对象=β 写入门：
+  rich β=1 三风险 5.38/5.67/5.37 vs null β=0 6.74/7.22/6.73 BPB，全维度 null>rich
+  可分，schema 兼容 `cbiu.py`），归档 `L:\FLUED_archive\s05_cbiu_anchors_20260802`。
+  RD 前沿图落地 `results/v3.6/rd_frontier_20260802/`（strict masked 口径：
+  v3.6 k=1/4/16 ≈0.146-0.151 近乎平直、HNet-DiT 瓶颈臂 0.142@97.5K 标量、
+  无压缩参照 0.324@262K——v3.6 以 ~1/64 传输率追平瓶颈臂）。
+  FlashKDA MSVC 补丁 diff + 上游 issue 草稿归档 `L:\FLUED_archive\flashkda_msvc_patch_20260802`
+  （待用户裁定后提交 MoonshotAI/FlashKDA issue）。
+- 2026-08-02：S0.5 ③ 首轮 GRPO 探针（预注册=规格 §14，新脚本
+  `tools/train/v3_6/train_v36_grpo.py` + 3 项 smoke 测试）：**否定结果但抓到奖励设计
+  缺陷**——GRPO 臂 0.1778/0.1064/42.8 全面劣于 decoder 重适应控制臂 0.1891/0.1513/33.7；
+  纯质量奖励（无率项）把边界推到容量上限（17.6→58.9/64 chunks，overflow 46.5 破位），
+  训练 reward 改善而 eval 反降（奖励捷径：碎切降低单段难度，k=1 焊死传输率故多切无代价）。
+  下轮修正：奖励加边界率项（cbiu.py 增广拉格朗日预算协议现成）。归档
+  `L:\FLUED_archive\s05_grpo_first_probe_20260802`。规格 §14 已附结果节。
+- 2026-08-02：③ 二/三轮探针完成（归档 `s05_grpo_second_probe_20260802` /
+  `s05_grpo_third_probe_20260802`）。二轮（采样计数字率项，预算 32）：训练内率受控
+  但温度涂抹使部署硬规则计数脱钩 ~1.8 倍，0.1841/0.1293 仍劣于控制臂；三轮（率项
+  锚确定性硬计数）：**组内零方差被 GRPO 组相对优势消掉**，率项消失、计数冲 63-81、
+  dual 打满，0.1673/0.1017 三轮最差。核心教训登记规格 §14：GRPO 组相对优势只能
+  优化组内有方差的量。四轮方向：采样计数机制 + cut_temperature 0.05 收拢涂抹 +
+  2K 步。测试 152 全绿（+3 GRPO smoke）。
+- 2026-08-02：③ 四轮定稿（用户裁决：判定改绝对+相对双口径；Σp 预算 18≈部署 24 段
+  锚用户 21B 粒度；NLA 借鉴：约束走可微直接损失、不进组相对奖励）并完成 2K 双臂。
+  结果：GRPO 臂 0.1782/0.1477/35.7 vs 控制臂 0.1906/0.1492/33.1——**masked 双口径
+  实质打平（四轮 GRPO 最佳且未封顶），backbone 双不过（−1.1~1.2pp），分级单过**；
+  **边界裁决大成功：hard 停点 24.3≈用户粒度，率项全程未激活（2K 尺度质量奖励自选
+  停点），β 未饱和，state_norm 5.6 健康，守卫全 0**。归档
+  `L:\FLUED_archive\s05_grpo_r4_2k_20260802`。五轮方向：R4 checkpoint 续训 10K。
+- 2026-08-02：S0.6 summarizer 容量全因子消融（8 臂×20K，只取 S0 前缀其余从头，
+  新 `--init-prefixes` 机制）完成：**用户假设"天花板在 summarizer"在 20K/512B 尺度
+  被证伪**——S/H/M 主效应 −0.24/−0.16/−0.09pp 全低于 2pp 阈值，最佳臂=A0 基线
+  （0.154，协议验证通过）。结论指向瓶颈在下游 readout 包均值条件通道（规格 §13/§15）；
+  KDA"增益后段集中"附注未获印证（A0/SHM 曲线全段重合）。归档
+  `L:\FLUED_archive\s05_summarizer_matrix_20260802`（41 项 manifest）。
+  下一步待裁定：decoder 逐段条件化改造 vs GRPO 10K 续训。
+- 2026-08-02：文档纪律执行——决策路线全景入规格 §16（S0.5 全链路决策树+方法论沉淀 5 条）；
+  证据注册表新增 E21（GRPO 边界微调可行，候选）、E22（summarizer 容量零效应，已验证）；
+  待裁定队列新增 Q8（岔口二选一）；TERMS 登记候选术语"逐段条件化"。
+- 2026-08-02：**S0.7 逐段条件化大阳性（E23）**：`per_chunk_readout` 改造落地
+  （KDA 每消费一段即从当前状态读出该段条件向量，替代 mean+pos 广播；canonical 默认
+  关闭不受影响；154 测试全绿），20K 从零臂 unmasked 0.190→0.351、PPL 33.9→12.1——
+  **信息在 KDA 状态里，均值通道是检索瓶颈，"整条 prompt 1 包"路线活**；masked
+  0.154→0.141 未过预注册 +2pp 线，口径部分失当（masked 测从未进状态的字节），
+  归因挂 Q1 类待裁定。Q8 已裁定执行，遗留 masked 归因/canonical v36.2 切换/
+  新条件化下 GRPO 重跑三项待用户。归档 `L:\FLUED_archive\s07_perchunk_20k_20260802`。
