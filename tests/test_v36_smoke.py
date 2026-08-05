@@ -218,3 +218,20 @@ def test_kda_fla_parity():
         out_fla = twin(ids)
     assert torch.allclose(out_ref.package, out_fla.package, atol=5e-2, rtol=5e-2)
     assert abs(out_ref.state_norm.item() - out_fla.state_norm.item()) < 0.1
+
+
+def test_pointwise_backbone_is_per_readout():
+    """v36.5: default backbone is per-readout (mlp) -- output row i must depend
+    only on input row i, so chunk permutation permutes outputs identically."""
+    torch.manual_seed(0)
+    model = FLUEDV36(tiny_config())
+    from flued.v36.model import PointwiseBackbone, TinyBackbone
+
+    assert isinstance(model.backbone, PointwiseBackbone)
+    assert isinstance(FLUEDV36(tiny_config(backbone_mode="attn")).backbone, TinyBackbone)
+    x = torch.randn(2, 4, 64)
+    with torch.no_grad():
+        out = model.backbone(x)
+        perm = [2, 0, 3, 1]
+        out_perm = model.backbone(x[:, perm])
+    assert torch.allclose(out_perm, out[:, perm], atol=1e-5)

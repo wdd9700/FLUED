@@ -56,6 +56,7 @@ class V36Config:
     backbone_layers: int = 3
     backbone_nhead: int = 8
     backbone_ffn: int = 1024
+    backbone_mode: str = "mlp"  # "mlp" = per-readout (v36.5 default); "attn" = legacy cross-chunk attention
     decoder_hidden: int = 1024
     decoder_layers: int = 3
     max_chunks: int = 64
@@ -259,6 +260,39 @@ class KDAStateMachine(nn.Module):
         return package, state.norm(dim=(-2, -1)).mean()
 
 
+class PointwiseBackbone(nn.Module):
+    """Per-readout backbone (v36.5): each chunk's readout vector is transformed
+    independently — cross-chunk sequence modeling belongs to the KDA recurrence,
+    not to a second attention stack over the chunk matrix. Completion/prediction
+    become strictly causal (no future-chunk leakage), so the training form
+    matches streaming generation. The legacy attention backbone remains as
+    ``backbone_mode="attn"`` for historical arms. Positional information is
+    added downstream (chunk_pos in the caller), so no position embedding here.
+    """
+
+    def __init__(self, c: V36Config) -> None:
+        super().__init__()
+        self.in_proj = nn.Linear(c.d_pack, c.d_backbone) if c.d_pack != c.d_backbone else nn.Identity()
+        self.blocks = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.LayerNorm(c.d_backbone),
+                    nn.Linear(c.d_backbone, c.backbone_ffn),
+                    nn.GELU(),
+                    nn.Linear(c.backbone_ffn, c.d_backbone),
+                )
+                for _ in range(c.backbone_layers)
+            ]
+        )
+        self.norm = nn.LayerNorm(c.d_backbone)
+
+    def forward(self, package: torch.Tensor) -> torch.Tensor:
+        h = self.in_proj(package)
+        for block in self.blocks:
+            h = h + block(h)
+        return self.norm(h)
+
+
 class TinyBackbone(nn.Module):
     def __init__(self, c: V36Config) -> None:
         super().__init__()
@@ -326,7 +360,7 @@ class FLUEDV36(nn.Module):
         self.summarizer = ChunkSummarizer(c) if c.summarizer_type == "slot" else DiTChunkSummarizer(c)
         self.write_head = WriteHead(c)
         self.state_machine = KDAStateMachine(c)
-        self.backbone = TinyBackbone(c)
+        self.backbone = TinyBackbone(c) if c.backbone_mode == "attn" else PointwiseBackbone(c)
         self.bridge = SoftBoundaryBridge(
             c.max_chunks, c.tau_cut, c.boundary_temperature, c.boundary_bridge_gradient_scale
         )
