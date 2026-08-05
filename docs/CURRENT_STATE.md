@@ -241,6 +241,12 @@ v3.6 证据基座：S0 + A/B 对照（E17/E18）+ E23/E24/E26/E27 改造链。
   DiT summarizer + 逐段条件化 + S1.0 三任务设为默认（V36Config/argparse/
   canonical_v36.json 三方已同步，训练入口 `train_v36_s1.py`）；S0′ 权重与
   教师标签归档 `L:\FLUED_archive\s0p_k25_v4_sft_20260805`。
+- 2026-08-05：用户裁定两条：① **标注教师停用 K2.5（价格），S0′ 扩量改用
+  DeepSeek v4 flash**（扩量轮已叫停，仅耗 ~50 次调用；切换前需 200 条试点
+  对比分布漂移）；② **masked 口径定为 40% 整 UTF-8 字 + 60% 整 BPE 词混合**
+  （练单字理解、避免养成高级 BPE；废 1-8B 随机 span），HNet-DiT 需同口径
+  重跑、R2 需 Mamba-2 忠实版 H-Net（现仓复现主干为 causal transformer，
+  已披露）。详见 `FLUED_TODO_20260805_CN.md` T1/T3。
 - 2026-08-05：S0.8 完成（D0/D7，DiT summarizer 前后对比，归档
   `L:\FLUED_archive\s08_dit_summarizer_20260802`）：**E24 串联瓶颈遮蔽效应**——
   D0 均值通道下形态零差异，D7 逐段条件化下 unmasked 0.351→0.549（+19.8pp）、
