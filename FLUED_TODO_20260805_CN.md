@@ -30,7 +30,7 @@ RD 前沿：0.765@35K 标量 vs HNet-DiT 瓶颈臂 0.492@97K。归档 `L:\FLUED_
 
 ### T3 masked 任务变体（2026-08-05 用户已定口径：40/60 混合）
 - **40% 整 UTF-8 字 mask + 60% 整 BPE 词 mask（用 128k 参照尺）**：整字 mask 锻炼单字理解；整词 mask 测语义推断、但占比不过半以**避免把架构养成高级 BPE**。现行"1-8B 随机 span 会切碎单字"的口径废弃。
-- 实现：`train_v36_s1.py` 加混合 mask 函数（整字 span 1-3 字 + 整词按 BPE token 边界），总遮蔽率仍 5%，eval 种子不变；保持旧 byte-span 模式作开关以兼容历史口径。
+- **代码已落地（2026-08-05，v36.3）**：`train_v36_s1.py` `make_mixed_mask`（`--mask-mode mixed` 默认，byte_span 保留开关；专用 CPU 生成器保 eval 确定性；`mask_rate` 实测入日志）。单测 5 项 + 实语料 smoke 通过（8×512 batch 1.0ms；实测速率 0.060 vs 目标 0.05，span 粒度尾差，各臂同码同种子对比有效）。
 - **对比口径统一工作项（用户提醒）**：① 现仓 HNet 复现/HNet-DiT 两臂的 Mamba-2 已被换成 causal transformer（`flued/hnet_repro/model.py` docstring 已披露）；Mamba-2 忠实版是 R2 候选（kda-kernels 环境已备 mamba_ssm 2.3.2）；② mask 口径变更后 HNet-DiT 瓶颈臂需同口径重跑（一个 20K run），对外对比表才有效；③ R2 时的最终对比需统一：同一 mask 口径、同一 BPB/acc 定义、同一 eval 集。
 
 ### T4 与 H-Net AR 的预测能力对齐评测

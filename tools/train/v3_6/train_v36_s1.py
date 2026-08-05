@@ -15,6 +15,14 @@ Metric redefinition (S1.0+): direct fidelity excludes nothing but MASK_ID
 positions are reported separately (trivially correct); masked acc is backbone
 only; prediction reported as predict_cos + sampled byte-level decode accuracy.
 
+Mask modes (--mask-mode):
+- ``byte_span``: legacy random 1-8B spans (kept for historical comparability).
+- ``mixed`` (v36.3 default): 40% of the byte budget masks whole UTF-8 chars
+  (1-3 chars per span), 60% masks whole BPE words against the 128k reference
+  tokenizer. Whole-char masking trains single-char understanding; whole-word
+  masking tests semantic inference without letting the architecture collapse
+  into a fancy BPE (word share is kept below half).
+
 Protocol: from-scratch ablation (only S0 four prefixes loaded), same
 data/seed/eval as canonical.
 """
@@ -36,7 +44,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from flued.data import MASK_ID, PAD_ID  # noqa: E402
+from flued.data import BYTE_OFFSET, MASK_ID, PAD_ID  # noqa: E402
 from tools.train.v3_3.train_v33 import (  # noqa: E402
     _append_jsonl,
     _cosine_with_warmup,
@@ -47,6 +55,116 @@ from tools.train.v3_3.train_v33 import (  # noqa: E402
     make_targets,
 )
 from tools.train.v3_6.train_v36 import _ce, build_model  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Mixed char/BPE-word masking (v36.3, T3)
+# ---------------------------------------------------------------------------
+
+# Module-level so the non-serializable tokenizer never lands in vars(args)
+# (resolved_config.json / summary.json dump the full args namespace).
+_BPE_TOKENIZER = None
+# Dedicated CPU generator: evaluate() re-seeds it so the eval mask is
+# deterministic regardless of dataset-RNG consumption order.
+_MASK_GENERATOR = torch.Generator()
+
+
+def _load_bpe_tokenizer(path: str) -> None:
+    global _BPE_TOKENIZER
+    from tokenizers import Tokenizer
+
+    resolved = Path(path)
+    if not resolved.is_absolute():
+        resolved = REPO_ROOT / resolved
+    _BPE_TOKENIZER = Tokenizer.from_file(str(resolved))
+
+
+def _utf8_char_spans(bs: bytes) -> list:
+    """Whole-UTF-8-char byte spans: continuation bytes (0b10xxxxxx) never start a char."""
+    starts = [i for i, b in enumerate(bs) if (b & 0xC0) != 0x80]
+    starts.append(len(bs))
+    return [(starts[i], starts[i + 1]) for i in range(len(starts) - 1)]
+
+
+def _bpe_word_spans(bs: bytes, tokenizer) -> list:
+    """Whole-BPE-word byte spans against the reference tokenizer.
+
+    Returns [] when the window is not valid UTF-8 (streaming windows can cut
+    mid-char at the edges); the caller then folds the word budget into chars.
+    """
+    try:
+        text = bs.decode("utf-8")
+    except UnicodeDecodeError:
+        return []
+    byte_offsets = [0]
+    for ch in text:
+        byte_offsets.append(byte_offsets[-1] + len(ch.encode("utf-8")))
+    spans = []
+    max_char = len(byte_offsets) - 1
+    for c0, c1 in tokenizer.encode(text, add_special_tokens=False).offsets:
+        # guard: offsets must stay inside the char->byte map (a normalizer
+        # changing text length would break this mapping; ours has none)
+        if c1 > c0 and 0 <= c0 and c1 <= max_char:
+            spans.append((byte_offsets[c0], byte_offsets[c1]))
+    return spans
+
+
+def make_mixed_mask(
+    clean: torch.Tensor,
+    mask_prob: float,
+    char_frac: float = 0.4,
+    char_span_max: int = 3,
+    tokenizer=None,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """40/60 mixed mask on CPU token ids (PAD-offset encoding).
+
+    ``char_frac`` of the masked-byte budget goes to whole UTF-8 chars
+    (1-``char_span_max`` chars per span), the rest to whole BPE words.
+    Spans never overlap; positions beyond the valid length stay unmasked.
+    """
+    bsz, _seq_len = clean.shape
+    mask = torch.zeros_like(clean, dtype=torch.bool)
+    if mask_prob <= 0:
+        return mask
+    for b in range(bsz):
+        ids = clean[b][clean[b].ne(PAD_ID)].tolist()
+        if not ids:
+            continue
+        bs = bytes(i - BYTE_OFFSET for i in ids)
+        n = len(bs)
+        budget = float(mask_prob) * n
+        word_budget = (1.0 - float(char_frac)) * budget
+        char_budget = float(char_frac) * budget
+        m = torch.zeros(n, dtype=torch.bool)
+        word_spans = _bpe_word_spans(bs, tokenizer) if tokenizer is not None else []
+        if word_spans:
+            acc = 0.0
+            for i in torch.randperm(len(word_spans), generator=generator).tolist():
+                if acc >= word_budget:
+                    break
+                s, e = word_spans[i]
+                if m[s:e].any():
+                    continue
+                m[s:e] = True
+                acc += e - s
+        else:
+            char_budget += word_budget
+        char_spans = _utf8_char_spans(bs)
+        acc = 0.0
+        trials = 0
+        max_trials = max(8 * len(char_spans), 64)
+        while acc < char_budget and trials < max_trials:
+            trials += 1
+            ci = int(torch.randint(len(char_spans), (1,), generator=generator))
+            ln = int(torch.randint(1, int(char_span_max) + 1, (1,), generator=generator))
+            s = char_spans[ci][0]
+            e = char_spans[min(ci + ln, len(char_spans)) - 1][1]
+            if m[s:e].any():
+                continue
+            m[s:e] = True
+            acc += e - s
+        mask[b, :n] = m
+    return mask
 
 
 def s1_forward(model, source: torch.Tensor, args) -> dict:
@@ -83,7 +201,17 @@ def s1_forward(model, source: torch.Tensor, args) -> dict:
 def step_model(model, batch, args, device, train: bool):
     clean = batch[0].to(device)
     valid = clean.ne(PAD_ID)
-    byte_mask = make_byte_mask(valid, args.mask_prob, args.mask_span_min, args.mask_span_max)
+    if getattr(args, "mask_mode", "byte_span") == "mixed":
+        byte_mask = make_mixed_mask(
+            clean.cpu(),
+            args.mask_prob,
+            char_frac=args.mask_char_frac,
+            char_span_max=args.mask_char_span_max,
+            tokenizer=_BPE_TOKENIZER,
+            generator=_MASK_GENERATOR,
+        ).to(device)
+    else:
+        byte_mask = make_byte_mask(valid, args.mask_prob, args.mask_span_min, args.mask_span_max)
     source = clean.masked_fill(byte_mask, MASK_ID)
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.amp and device.type == "cuda"):
         out = s1_forward(model, source, args)
@@ -126,6 +254,7 @@ def step_model(model, batch, args, device, train: bool):
         "backbone_masked_acc": _safe_acc(out["logits_backbone"].argmax(dim=-1), targets, masked_slot),
         "backbone_unmasked_acc": _safe_acc(out["logits_backbone"].argmax(dim=-1), targets, unmasked_slot),
         "predict_cos": predict_cos,
+        "mask_rate": float(byte_mask.float().sum().item() / valid.float().sum().clamp(min=1.0).item()),
         "truncated_tokens": float(chunks.pack_info["truncated_tokens"].float().sum().item()),
         "cut_capacity_overflow": float(out["cut_overflow"].float().sum().item()),
         "chunks_per_sample": float(chunks.chunk_mask.float().sum(dim=1).mean().item()),
@@ -142,6 +271,7 @@ def evaluate(model, eval_loader, args, device):
     torch.manual_seed(args.eval_mask_seed)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(args.eval_mask_seed)
+    _MASK_GENERATOR.manual_seed(args.eval_mask_seed)
     rows = []
     for i, batch in enumerate(eval_loader):
         if i >= args.max_eval_batches:
@@ -165,11 +295,22 @@ def main() -> None:
     pre_args, _ = pre.parse_known_args()
     parser = build_parser()
     parser.add_argument("--predict-weight", type=float, default=1.0)
+    parser.add_argument("--mask-mode", choices=["byte_span", "mixed"], default="mixed")
+    parser.add_argument("--mask-char-frac", type=float, default=0.4)
+    parser.add_argument("--mask-char-span-max", type=int, default=3)
+    parser.add_argument(
+        "--bpe-tokenizer-path",
+        type=str,
+        default="checkpoints/bpe_tokenizer_128k_v4/tokenizer.json",
+    )
     if pre_args.config:
         parser.set_defaults(**json.loads(Path(pre_args.config).read_text(encoding="utf-8")))
     args = parser.parse_args()
     if not args.per_chunk_readout:
         raise SystemExit("S1.0 requires --per-chunk-readout")
+    if args.mask_mode == "mixed":
+        _load_bpe_tokenizer(args.bpe_tokenizer_path)
+    _MASK_GENERATOR.manual_seed(args.seed)
 
     device = torch.device(args.device if args.device == "cpu" or torch.cuda.is_available() else "cpu")
     torch.manual_seed(args.seed)

@@ -22,11 +22,14 @@
 
 机器可读源：`configs/canonical_v35.json`（canonical_version: `v35.1-20260717`，
 v3.4 收尾系列旧口径，保留有效）与 `configs/canonical_v36.json`
-（canonical_version: `v36.2-20260805`，**v3.6 线当前默认起点**：S0′ K2.5 教师
+（canonical_version: `v36.3-20260805`，**v3.6 线当前默认起点**：S0′ K2.5 教师
 预训 byte embedder+segmentor 冻结接管、DiT summarizer、逐段条件化读出、动态边界、
 4× KDA 状态、S1.0 三任务（direct 保真/主干补全/潜空间预测，训练入口
-`tools/train/v3_6/train_v36_s1.py`）。v3.4 证据基座：v3.5 L0 两 seed 验证（E1）；
-v3.6 证据基座：S0 + A/B 对照（E17/E18）+ E23/E24/E26/E27 改造链。
+`tools/train/v3_6/train_v36_s1.py`）、40/60 混合 mask 口径（40% 整 UTF-8 字 +
+60% 整 BPE 词，128k 参照尺边界；v36.2 的 1-8B 随机 byte span 废止、经
+`--mask-mode byte_span` 保留）。v3.4 证据基座：v3.5 L0 两 seed 验证（E1）；
+v3.6 证据基座：S0 + A/B 对照（E17/E18）+ E23/E24/E26/E27 改造链（E27 及之前
+数字均为 byte_span 口径，混合口径 20K 复测进行中）。
 
 | 项 | 当前默认 | 证据 |
 |---|---|---|
@@ -247,6 +250,14 @@ v3.6 证据基座：S0 + A/B 对照（E17/E18）+ E23/E24/E26/E27 改造链。
   （练单字理解、避免养成高级 BPE；废 1-8B 随机 span），HNet-DiT 需同口径
   重跑、R2 需 Mamba-2 忠实版 H-Net（现仓复现主干为 causal transformer，
   已披露）。详见 `FLUED_TODO_20260805_CN.md` T1/T3。
+- 2026-08-05：T3 混合 mask 代码落地（`train_v36_s1.py`：`--mask-mode mixed`
+  默认，40% 整 UTF-8 字（1-3 字 span）+ 60% 整 BPE 词（128k 参照尺边界），
+  `byte_span` 旧口径保留为开关；专用 CPU 生成器保证 eval mask 确定性；
+  `mask_rate` 实测指标入日志）。单测 5 项全绿（速率/UTF-8 对齐/确定性/
+  空行/零概率），soulvlm 实语料 smoke：8×512 batch 掩码生成 1.0ms
+  （相对 ~1s/step 可忽略），实测速率 0.060 vs 目标 0.05（span 粒度尾差，
+  各臂同码同种子故对比有效）。**canonical 切 v36.3-20260805**；
+  E27 及之前数字均为 byte_span 口径，新口径 20K 复测启动后回填。
 - 2026-08-05：S0.8 完成（D0/D7，DiT summarizer 前后对比，归档
   `L:\FLUED_archive\s08_dit_summarizer_20260802`）：**E24 串联瓶颈遮蔽效应**——
   D0 均值通道下形态零差异，D7 逐段条件化下 unmasked 0.351→0.549（+19.8pp）、

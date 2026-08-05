@@ -136,6 +136,7 @@
 | 逐段条件化 | 逐段条件化（per-chunk conditioning） | decoder 按段从压缩状态读出各自条件向量、替代"全 prompt 均值+位置嵌入"广播的改造方向；治 readout 包均值瓶颈，代价是传输标量随段数上升 | v3.6 规格 §15/§16 | AI(Kimi) | 2026-08-02 | 候选 |
 | byte embedder | 字节嵌入器（byte embedder） | byte_lookup + encoder_blocks 的合称：字节→字节态的前端嵌入（原称 byte encoder；用户裁定改名——它不做语义编码，只是嵌入+上下文整理） | 用户指令 2026-08-05 | 用户 | 2026-08-05 | 已注册 |
 | 下游污染 | 下游污染（downstream contamination） | 旧 S0 权重（4B 教师粗粒度标签训练）被冻结继承进所有后续 run，使其实验结果只能用于归因、不能作为新 S0′ 起点的现象 | 用户指令 2026-08-05 | 用户 | 2026-08-05 | 已注册 |
+| 40/60 混合 mask | 40/60 混合遮蔽口径 | v36.3 起默认 masked 口径：遮蔽预算 40% 整 UTF-8 字（1-3 字 span，练单字理解）+ 60% 整 BPE 词（128k 参照尺边界，测语义推断且占比不过半防养成高级 BPE）；废止 v36.2 的 1-8B 随机 byte span | FLUED_TODO_20260805_CN.md T3 | 用户 | 2026-08-05 | 已注册 |
 
 ## 8. Changelog
 
@@ -155,3 +156,4 @@
 - 2026-08-05：用户提名直接转正两条：byte embedder（字节嵌入器，byte_lookup+
   encoder_blocks 的合称，取代 byte encoder 称谓）、下游污染（downstream
   contamination，旧 S0 权重产物只可用于归因、不可作新 S0′ 起点）。
+- 2026-08-05：登记 40/60 混合 mask（用户裁定口径，直接转正）。
