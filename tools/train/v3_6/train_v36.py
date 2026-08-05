@@ -79,6 +79,9 @@ def build_model(args: Namespace) -> FLUEDV36:
             per_chunk_readout=args.per_chunk_readout,
             summarizer_type=args.summarizer_type,
             summarizer_dit_layers=args.summarizer_dit_layers,
+            prefix_task=args.prefix_task,
+            prefix_positions=args.prefix_positions,
+            kda_impl=args.kda_impl,
         )
     )
 
@@ -105,6 +108,16 @@ def step_model(model, batch, args, device, train: bool):
     backbone_loss = _ce(out.logits_backbone, targets, slot_mask)
     loss = args.task1_loss_weight * direct_loss + args.task2_loss_weight * backbone_loss
     unmasked_slot = slot_mask & ~masked_slot
+    if getattr(args, "prefix_task", False) and out.prefix:
+        d_losses, b_losses = [], []
+        for i, ld, lb in out.prefix:
+            t_i = targets[:, : i + 1]
+            sm_i = slot_mask[:, : i + 1]
+            d_losses.append(_ce(ld, t_i, sm_i))
+            b_losses.append(_ce(lb, t_i, sm_i))
+        direct_loss = torch.stack(d_losses).mean()
+        backbone_loss = torch.stack(b_losses).mean()
+        loss = args.task1_loss_weight * direct_loss + args.task2_loss_weight * backbone_loss
     metrics = {
         "loss": float(loss.item()),
         "direct_loss": float(direct_loss.item()),
@@ -121,6 +134,13 @@ def step_model(model, batch, args, device, train: bool):
         "state_norm": float(out.state_norm.item()),
         "boundary_confidence_mean": float(out.aux["boundary_confidence_mean"].item()),
     }
+    if getattr(args, "prefix_task", False) and out.prefix:
+        last_i = out.prefix[-1][0]
+        for i, _ld, lb in out.prefix:
+            t_i = targets[:, : i + 1]
+            sm_i = slot_mask[:, : i + 1]
+            bucket = int(round(8 * i / max(last_i, 1)))
+            metrics[f"prefix_acc_q{bucket}"] = _safe_acc(lb.argmax(dim=-1), t_i, sm_i)
     return loss, metrics
 
 
@@ -201,6 +221,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--per-chunk-readout", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--summarizer-type", choices=["slot", "dit"], default="slot")
     parser.add_argument("--summarizer-dit-layers", type=int, default=2)
+    parser.add_argument("--prefix-task", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--prefix-positions", type=int, default=4)
+    parser.add_argument("--kda-impl", choices=["torch", "fla"], default="torch")
+    parser.add_argument("--eval-only", default="", help="path to a checkpoint; run evaluate() on it and exit")
     parser.add_argument("--mask-prob", type=float, default=0.05)
     parser.add_argument("--mask-span-min", type=int, default=1)
     parser.add_argument("--mask-span-max", type=int, default=8)
@@ -241,6 +265,14 @@ def main() -> None:
     (out_dir / "resolved_config.json").write_text(json.dumps(vars(args), indent=2), encoding="utf-8")
 
     model = build_model(args).to(device)
+    if args.eval_only:
+        payload = torch.load(args.eval_only, map_location=device, weights_only=False)
+        model.load_state_dict(payload["model"], strict=True)
+        model.eval()
+        _t, eval_loader = make_dataloaders(args)
+        stats = evaluate(model, eval_loader, args, device)
+        print(json.dumps(stats, ensure_ascii=False, indent=2), flush=True)
+        return
     if args.init_checkpoint:
         payload = torch.load(args.init_checkpoint, map_location=device, weights_only=False)
         current = model.state_dict()

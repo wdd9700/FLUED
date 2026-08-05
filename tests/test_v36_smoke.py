@@ -162,3 +162,56 @@ def test_dit_summarizer_per_chunk_readout_combo():
     out = model(ids)
     assert out.package.shape == (2, 4, 1, 64)
     assert torch.isfinite(out.logits_backbone).all()
+
+
+def test_prefix_task_positions_and_shapes():
+    torch.manual_seed(0)
+    model = FLUEDV36(tiny_config(per_chunk_readout=True, prefix_task=True, prefix_positions=3))
+    model.train()
+    ids = torch.randint(1, 258, (2, 32))
+    out = model(ids)
+    assert out.prefix is not None
+    positions = [i for i, _ld, _lb in out.prefix]
+    assert positions[-1] == 3  # final position always included (max_chunks-1 = 3)
+    assert len(positions) <= 3
+    for i, ld, lb in out.prefix:
+        assert ld.shape == (2, i + 1, 8, 258)
+        assert lb.shape == (2, i + 1, 8, 258)
+        assert torch.isfinite(ld).all() and torch.isfinite(lb).all()
+    model.eval()
+    out = model(ids)
+    assert out.prefix[-1][0] == 3
+
+
+def test_prefix_task_backward_reaches_core():
+    torch.manual_seed(0)
+    model = FLUEDV36(tiny_config(per_chunk_readout=True, prefix_task=True, prefix_positions=3))
+    model.train()
+    ids = torch.randint(1, 258, (2, 32))
+    out = model(ids)
+    loss = sum(ld.square().mean() + lb.square().mean() for _i, ld, lb in out.prefix)
+    loss.backward()
+    for prefix in ["summarizer", "write_head", "state_machine", "backbone", "decoder"]:
+        grads = [p.grad for n, p in model.named_parameters() if n.startswith(prefix)]
+        assert any(g is not None and g.abs().sum() > 0 for g in grads), prefix
+
+
+def test_kda_fla_parity():
+    import pytest
+
+    if not torch.cuda.is_available():
+        pytest.skip("cuda required")
+    try:
+        import fla.ops.kda  # noqa: F401
+    except Exception:
+        pytest.skip("fla not installed")
+    torch.manual_seed(0)
+    base = FLUEDV36(tiny_config(per_chunk_readout=True)).cuda()
+    twin = FLUEDV36(tiny_config(per_chunk_readout=True, kda_impl="fla")).cuda()
+    twin.load_state_dict(base.state_dict())
+    ids = torch.randint(1, 258, (2, 32), device="cuda")
+    with torch.no_grad():
+        out_ref = base(ids)
+        out_fla = twin(ids)
+    assert torch.allclose(out_ref.package, out_fla.package, atol=5e-2, rtol=5e-2)
+    assert abs(out_ref.state_norm.item() - out_fla.state_norm.item()) < 0.1

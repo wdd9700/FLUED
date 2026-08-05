@@ -27,6 +27,11 @@ from flued.v34.model import (
     _plastic_signed_confidence,
 )
 
+try:
+    from fla.ops.kda import chunk_kda as _fla_chunk_kda
+except Exception:  # fla is optional (tests / non-GPU environments)
+    _fla_chunk_kda = None
+
 
 @dataclass
 class V36Config:
@@ -65,6 +70,9 @@ class V36Config:
     per_chunk_readout: bool = False
     summarizer_type: str = "slot"
     summarizer_dit_layers: int = 2
+    prefix_task: bool = False
+    prefix_positions: int = 4
+    kda_impl: str = "torch"
 
 
 @dataclass
@@ -78,6 +86,7 @@ class V36Output:
     memory: torch.Tensor
     state_norm: torch.Tensor
     aux: dict
+    prefix: list | None = None  # [(position_i, logits_direct_i, logits_backbone_i), ...]
 
 
 class ChunkSummarizer(nn.Module):
@@ -177,6 +186,45 @@ class KDAStateMachine(nn.Module):
         )
 
     def forward(self, gates: dict[str, torch.Tensor], chunk_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.c.kda_impl == "fla":
+            if _fla_chunk_kda is None:
+                raise RuntimeError("kda_impl='fla' requires the fla package")
+            return self._forward_fla(gates, chunk_mask)
+        return self._forward_torch(gates, chunk_mask)
+
+    def _forward_fla(self, gates: dict[str, torch.Tensor], chunk_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        k, v, beta, alpha = gates["k"], gates["v"], gates["beta"], gates["alpha"]
+        keep = chunk_mask.unsqueeze(-1).unsqueeze(-1).to(k.dtype)
+        k = k * keep
+        v = v * keep
+        bsz, chunks, heads, dk = k.shape
+        beta = beta * chunk_mask.unsqueeze(-1).to(beta.dtype)
+        # g in log space; zero at padded chunks -> decay exp(0)=1 (identity step)
+        g = torch.log(alpha.clamp_min(1.0e-6)).to(k.dtype) * keep
+        q = self.readout_query
+        outs = []
+        final_state = None
+        for qi in range(q.size(0)):
+            o, final_state = _fla_chunk_kda(
+                q=q[qi].to(k.dtype).unsqueeze(0).unsqueeze(0).expand(bsz, chunks, -1, -1).contiguous(),
+                k=k,
+                v=v,
+                g=g.expand(bsz, chunks, -1, -1).contiguous(),
+                beta=beta,
+                scale=1.0,
+                use_qk_l2norm_in_kernel=False,
+                output_final_state=True,
+            )
+            outs.append(o)
+        o = torch.stack(outs, dim=2)  # (B, C, nq, H, V)
+        read = o.reshape(bsz, chunks, q.size(0), heads * v.size(-1))
+        if self.c.per_chunk_readout:
+            package = self.realign(read)
+        else:
+            package = self.realign(read[:, -1])
+        return package, final_state.float().norm(dim=(-2, -1)).mean()
+
+    def _forward_torch(self, gates: dict[str, torch.Tensor], chunk_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         k, v, beta, alpha = gates["k"], gates["v"], gates["beta"], gates["alpha"]
         keep = chunk_mask.unsqueeze(-1).unsqueeze(-1).to(k.dtype)
         k = k * keep
@@ -289,17 +337,26 @@ class FLUEDV36(nn.Module):
         self.chunk_pos = nn.Embedding(c.max_chunks, c.d_backbone)
         nn.init.trunc_normal_(self.chunk_pos.weight, std=0.02)
 
+    def _front_end_frozen(self) -> bool:
+        mods = (self.byte_lookup, *self.encoder_blocks, *self.segmentor_blocks, self.segmentor_head)
+        return all(not p.requires_grad for m in mods for p in m.parameters())
+
     def _encode(self, token_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         valid = token_ids.ne(PAD_ID)
-        x = self.byte_lookup(token_ids)
-        noise = x.new_zeros(token_ids.size(0))
-        for block in self.encoder_blocks:
-            x = block(x, valid, noise)
-        byte_states = x
-        for block in self.segmentor_blocks:
-            x = block(x, valid, noise)
-        logits = self.segmentor_head(x).squeeze(-1)
-        confidence = _plastic_signed_confidence(logits)
+        # When the whole front end (byte lookup + encoder + segmentor) is frozen,
+        # keep it out of the autograd graph: downstream modules only need the
+        # values, and dropping the 12-layer attention graph saves gigabytes.
+        ctx = torch.no_grad() if self._front_end_frozen() else torch.enable_grad()
+        with ctx:
+            x = self.byte_lookup(token_ids)
+            noise = x.new_zeros(token_ids.size(0))
+            for block in self.encoder_blocks:
+                x = block(x, valid, noise)
+            byte_states = x
+            for block in self.segmentor_blocks:
+                x = block(x, valid, noise)
+            logits = self.segmentor_head(x).squeeze(-1)
+            confidence = _plastic_signed_confidence(logits)
         return byte_states, confidence, valid, logits
 
     def encode_boundary_logits(self, token_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -340,14 +397,48 @@ class FLUEDV36(nn.Module):
             pos = self.chunk_pos.weight.unsqueeze(0)[:, :n_chunks]
             cond_direct = self.decoder_in(content) + pos
             cond_backbone = backbone_out + pos
+            prefix = None
+            if self.config.prefix_task:
+                # Streaming prefix task: at position i, condition on the readout
+                # of S_i and restore ALL bytes of chunks 0..i. Positions are
+                # sampled among REAL chunks only (padding rows would just burn
+                # memory and trigger allocator thrash).
+                real_max = int(chunks.chunk_mask.float().sum(dim=1).max().item())
+                real_max = max(real_max, 1)
+                if self.training:
+                    k = min(self.config.prefix_positions - 1, max(real_max - 1, 0))
+                    interior = (
+                        torch.randperm(real_max - 1, device=token_ids.device)[:k].add(1).tolist()
+                        if k > 0
+                        else []
+                    )
+                    positions = sorted(set(interior + [real_max - 1]))
+                else:
+                    stride = max(1, real_max // 8)
+                    positions = sorted(set(list(range(0, real_max, stride)) + [real_max - 1]))
+                prefix = []
+                for i in positions:
+                    mask_i = chunks.token_mask[:, : i + 1]
+                    cond_d_i = self.decoder_in(content[:, i]).unsqueeze(1) + pos[:, : i + 1]
+                    cond_b_i = backbone_out[:, i].unsqueeze(1) + pos[:, : i + 1]
+                    prefix.append((i, self.decoder(cond_d_i, mask_i), self.decoder(cond_b_i, mask_i)))
         else:
             backbone_out = self.backbone(package)
             n_chunks = chunks.chunk_mask.size(1)
             pos = self.chunk_pos.weight.unsqueeze(0)[:, :n_chunks]
             cond_direct = self.decoder_in(package.mean(dim=1)).unsqueeze(1) + pos
             cond_backbone = backbone_out.mean(dim=1).unsqueeze(1) + pos
-        logits_direct = self.decoder(cond_direct, chunks.token_mask)
-        logits_backbone = self.decoder(cond_backbone, chunks.token_mask)
+        logits_ctx = (
+            torch.no_grad()
+            if self.config.prefix_task and self.training and self.config.per_chunk_readout
+            else torch.enable_grad()
+        )
+        with logits_ctx:
+            # In prefix training these full-path logits are metrics-only, so
+            # they must not build an autograd graph (two of the biggest tensors
+            # per step).
+            logits_direct = self.decoder(cond_direct, chunks.token_mask)
+            logits_backbone = self.decoder(cond_backbone, chunks.token_mask)
         aux = {
             "truncated_tokens": chunks.pack_info["truncated_tokens"].float(),
             "cut_capacity_overflow": cut_overflow.float().sum(),
@@ -366,4 +457,5 @@ class FLUEDV36(nn.Module):
             memory=memory,
             state_norm=state_norm,
             aux=aux,
+            prefix=prefix if self.config.per_chunk_readout else None,
         )
