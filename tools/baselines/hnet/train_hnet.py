@@ -41,6 +41,7 @@ from tools.train.v3_3.train_v33 import (  # noqa: E402
 )
 from flued.data import PAD_ID  # noqa: E402
 from flued.hnet_repro import HNetRepro, HNetReproConfig  # noqa: E402
+import tools.train.v3_6.train_v36_s1 as s1  # noqa: E402
 
 MASK_ID = 257
 
@@ -49,7 +50,18 @@ def step_model(model, batch, args, device):
     ids = batch[0].to(device)
     valid = ids.ne(PAD_ID)
     if args.mode == "dit":
-        byte_mask = make_byte_mask(valid, args.mask_prob, args.mask_span_min, args.mask_span_max)
+        if getattr(args, "mask_mode", "byte_span") == "mixed":
+            # v36.3 40/60 mixed protocol: whole UTF-8 chars + whole BPE words
+            byte_mask = s1.make_mixed_mask(
+                ids.cpu(),
+                args.mask_prob,
+                char_frac=args.mask_char_frac,
+                char_span_max=args.mask_char_span_max,
+                tokenizer=s1._BPE_TOKENIZER,
+                generator=s1._MASK_GENERATOR,
+            ).to(device)
+        else:
+            byte_mask = make_byte_mask(valid, args.mask_prob, args.mask_span_min, args.mask_span_max)
         source = ids.masked_fill(byte_mask, MASK_ID)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.amp and device.type == "cuda"):
             out = model(source)
@@ -98,6 +110,7 @@ def evaluate(model, eval_loader, args, device):
         torch.manual_seed(args.eval_mask_seed)
         if device.type == "cuda":
             torch.cuda.manual_seed_all(args.eval_mask_seed)
+        s1._MASK_GENERATOR.manual_seed(args.eval_mask_seed)
     rows = []
     for i, batch in enumerate(eval_loader):
         if i >= args.max_eval_batches:
@@ -143,6 +156,14 @@ def main() -> None:
     parser.add_argument("--mask-prob", type=float, default=0.05)
     parser.add_argument("--mask-span-min", type=int, default=1)
     parser.add_argument("--mask-span-max", type=int, default=8)
+    parser.add_argument("--mask-mode", choices=["byte_span", "mixed"], default="byte_span")
+    parser.add_argument("--mask-char-frac", type=float, default=0.4)
+    parser.add_argument("--mask-char-span-max", type=int, default=3)
+    parser.add_argument(
+        "--bpe-tokenizer-path",
+        type=str,
+        default="checkpoints/bpe_tokenizer_128k_v4/tokenizer.json",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--d-model", type=int, default=512)
@@ -170,6 +191,9 @@ def main() -> None:
     torch.manual_seed(args.seed)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(args.seed)
+    if getattr(args, "mask_mode", "byte_span") == "mixed":
+        s1._load_bpe_tokenizer(args.bpe_tokenizer_path)
+    s1._MASK_GENERATOR.manual_seed(args.seed)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "resolved_config.json").write_text(json.dumps(vars(args), indent=2), encoding="utf-8")

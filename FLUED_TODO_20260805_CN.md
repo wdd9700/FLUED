@@ -3,10 +3,10 @@
 > 单一事实源 `docs/CURRENT_STATE.md`；术语 `docs/TERMS.md`；主线规格 `docs/versions/v3.6/FLUED_V3_6_SPEC_20260725_CN.md`（§1-§20）。
 > 本文是当前待办快照。canonical：**v36.2-20260805**（S0′ 前端 + DiT summarizer + 逐段读出 + S1.0 三任务，训练入口 `tools/train/v3_6/train_v36_s1.py`）。
 
-## 0. 当前最强数字（v36.2，20K/512B/单 seed）
+## 0. 当前最强数字（v36.3，20K/512B/单 seed）
 
-direct 保真 0.772 / unmasked 0.765 / PPL 2.74 / masked 0.148 / predict_cos 0.898 / 段数 23（≈用户 21B 粒度）。
-RD 前沿：0.765@35K 标量 vs HNet-DiT 瓶颈臂 0.492@97K。归档 `L:\FLUED_archive\s10p_s0p_20k_20260805`。
+E28 混合 mask 口径主臂：direct 0.789 / unmasked 0.782 / PPL 2.637 / masked 0.141（噪声带内持平）/ predict_cos 0.862 / 段数 23.5；较 E27 byte_span 口径三主项 +1.8pp/+1.7pp/−0.10，口径切换零回退。
+归档 `L:\FLUED_archive\s11_mixedmask_20k_20260805`（含 S1.0 语义 CBIU 锚点 + 预测解码评测）。
 
 ## 1. 讨论已定论项（2026-08-05 与用户讨论）
 
@@ -19,23 +19,24 @@ RD 前沿：0.765@35K 标量 vs HNet-DiT 瓶颈臂 0.492@97K。归档 `L:\FLUED_
 
 ### T1 S0′ 扩量（用户判断：还有潜力）
 - 现状：1,686 条 v4 K2.5 标签 → S0′。证据：direct/unmasked 曲线 20K 步仍在上升未饱和；±1 字刀口偏移（时|候类）是已知长尾。
-- **教师切换（用户 2026-08-05 裁定）：停用 K2.5（价格过高），改用 DeepSeek v4 flash**；K2.5 扩量轮已叫停（仅消耗 ~50 次调用）。风险：教师更换可能带来标签分布漂移——开工前先同样本对比 DeepSeek 与 K2.5 的合格率/粒度分布（200 条试点），分布不一致则以 K2.5 存量 1,686 条为锚、DeepSeek 只作增量并记录来源字段。
-- 方案：标 6-8K 条（`--rules-file S05_TEACHER_RULES_CN.md` + 非思考）；DeepSeek 为 OpenAI 兼容协议，脚本换 endpoint/model 即可（token 自备后给我）。
-- 之后：S0′′ SFT（train_s0_segmentor.py，从零）→ S1.0 条件 20K 评测臂对照 E27。
+- **教师切换已定案（2026-08-05）：v4-pro + 纯净规则 + 关思考 + temp 0.2**。五轮 200 条配对试点：flash 各配置全线失败（中文 2× 粗或修中丢英），pro 一次贴锚（ZH 23.8B/EN 26.5B vs 锚 23.6/29.8，合格率 93%）。10 条 subagent 抽检：带条件可用（1/10 硬违规剔除；介词悬空 4/10 建议 R7 补反例——全量合并后加机器预筛：中文段 >21 字/英文 >9 词零容忍退回）。
+- **全量 8K 标注进行中**（`outputs/s05_pro_teacher_v4_8k_20260805`，seed 20260805 避开 K2.5 区间），净得预计 ~7K；合并时记录来源字段（k25 / deepseek_v4pro）。
+- 之后：S0′′ SFT（train_s0_segmentor.py，从零）→ S1.0 条件 20K 评测臂对照 E27/E28。
 
 ### T2 GRPO 在 v36.2 上重跑（奖励比例微调）
-- 必须先在 v36.2 形态下重算 CBIU 锚点（`tools/analysis/v3_6/probe_v36_cbiu_anchors.py`——注意它当前只兼容旧两任务语义，需要适配 S1.0 三任务的风险定义）。
+- ~~必须先在 v36.2 形态下重算 CBIU 锚点~~ **锚点已重算（2026-08-05，S1.0 语义 + 混合口径，`s11_mixedmask_20k_20260805/cbiu_anchors/`，rich/null 三维全可分）**；探针已适配三任务风险定义（reconstruction=as-encoded 保真）。
 - 奖励比例：R4 是 rl_weight=1.0、Σp 预算 18；新起点已是用户粒度（23 段），率约束角色从"拉回来"变"守住"，预算改锚 S0′ 起点（Σp≈23，或对偶自校准）；rl_weight 可降 0.3-0.5（R4 里 pg 梯度占比偏大）。
 - 控制臂：train_v36_s1.py 同快照续训。
 
 ### T3 masked 任务变体（2026-08-05 用户已定口径：40/60 混合）
 - **40% 整 UTF-8 字 mask + 60% 整 BPE 词 mask（用 128k 参照尺）**：整字 mask 锻炼单字理解；整词 mask 测语义推断、但占比不过半以**避免把架构养成高级 BPE**。现行"1-8B 随机 span 会切碎单字"的口径废弃。
 - **代码已落地（2026-08-05，v36.3）**：`train_v36_s1.py` `make_mixed_mask`（`--mask-mode mixed` 默认，byte_span 保留开关；专用 CPU 生成器保 eval 确定性；`mask_rate` 实测入日志）。单测 5 项 + 实语料 smoke 通过（8×512 batch 1.0ms；实测速率 0.060 vs 目标 0.05，span 粒度尾差，各臂同码同种子对比有效）。
-- **对比口径统一工作项（用户提醒）**：① 现仓 HNet 复现/HNet-DiT 两臂的 Mamba-2 已被换成 causal transformer（`flued/hnet_repro/model.py` docstring 已披露）；Mamba-2 忠实版是 R2 候选（kda-kernels 环境已备 mamba_ssm 2.3.2）；② mask 口径变更后 HNet-DiT 瓶颈臂需同口径重跑（一个 20K run），对外对比表才有效；③ R2 时的最终对比需统一：同一 mask 口径、同一 BPB/acc 定义、同一 eval 集。
+- **对比口径统一工作项（用户提醒）**：① 现仓 HNet 复现/HNet-DiT 两臂的 Mamba-2 已被换成 causal transformer（`flued/hnet_repro/model.py` docstring 已披露）；Mamba-2 忠实版是 R2 候选（kda-kernels 环境已备 mamba_ssm 2.3.2）；② **HNet-DiT 瓶颈臂同口径 20K 重跑进行中**（`checkpoints/hnet_dit_bottleneck_mixed_20k_20260805`，`train_hnet.py` 已支持 `--mask-mode mixed`），标准臂待排；③ R2 时的最终对比需统一：同一 mask 口径、同一 BPB/acc 定义、同一 eval 集。
 
 ### T4 与 H-Net AR 的预测能力对齐评测
 - 现状不对齐：H-Net 复现是 next-byte BPB 0.653（全字节上下文无压缩，天花板锚）；我们的是潜空间 predict_cos 0.898，不可直接比。
-- 方案：给 S1.0 checkpoint 补"预测路径字节级解码"评测（backbone_out[i] → decoder → 第 i+1 段字节），得 byte acc/BPB，与 0.653 比时注明任务差异（next-chunk vs next-byte、压缩 vs 无压缩）。
+- **首轮已测（2026-08-05，`eval_v36_predict_decode.py` on s11 checkpoint）**：零样本 decoder 复用 byte acc 0.099 / BPB 10.1——比均匀随机还差（自信地错），证明潜空间预测信息不能经现有 decoder 白拿；这是下限口径。
+- 下一步：训一个轻量探针读头（冻结主干，backbone_out[i] → 小读头 → 第 i+1 段字节），得 byte acc/BPB 上界估计，与 0.653 比时注明任务差异（next-chunk vs next-byte、压缩 vs 无压缩）。
 
 ### T5 残余工作项
 - state_norm 上行（S1.0 16.3 / S0′ 15.4，此前 2-8）：预测任务推高状态范数，bf16 稳定性观察项（K4 NaN 前科）。

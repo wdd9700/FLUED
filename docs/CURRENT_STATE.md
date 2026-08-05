@@ -76,6 +76,7 @@ v3.6 证据基座：S0 + A/B 对照（E17/E18）+ E23/E24/E26/E27 改造链（E2
 | E25 | 切分质量四方对比（128k BPE 子集尺，v4 同 64 样本）：GRPO R4 精确 97.1% > BLT 熵切分 88.5%（25M byte LM、v3+v4、20K 等步数等规模）> S0 旧 75.4% > S0′ 39.8%（后者为标点挂段尾风格的 ±1 字偏移，容差后 99.8%）；四方容差口径均无词内切分 | 已验证（工程口径） | bpe_subset_audit + blt_entropy_audit（2026-08-05） |
 | E26 | S1.0 三任务拆分（direct 保真 as-encoded / 补全仅主干路径 / 潜空间预测 stop-grad）：direct 0.610、补全 unmasked 0.597、PPL 5.24（三项历史最佳），predict_cos 0.896（主干做实预测）；masked 主干独占口径 0.138 未升——"masked 上限是任务难度非主干容量/角色"第三条独立证据 | 已验证（单 seed，20K/512B 工程口径） | s10_three_task_20k（2026-08-05） |
 | E27 | S0′（K2.5 教师/用户 21B 粒度/语言学干净边界）下游大胜：direct 0.610→0.772、unmasked 0.597→0.765、PPL 5.24→2.74（约 −48%），masked 0.148 历史最高（噪声带内）；段数 23.0 vs 17.6（传输 35K vs 27K 标量，部分增益来自率升）；predict_cos 持平。旧 4B 教师标签退役；原 5K 纠偏重标判定不需要 | 已验证（单 seed，20K/512B 工程口径） | s10p_s0p_20k（2026-08-05） |
+| E28 | 40/60 混合 mask 口径（v36.3）20K 主臂：direct 0.789 / unmasked 0.782 / PPL 2.637 / masked 0.141（±1pp 噪声带内持平 E27）——口径切换零回退、三主项小幅上行（+1.8pp/+1.7pp/−0.10）；predict_cos 0.862（较 E27 0.898 略降，列观察项）；state_norm 12.1 较 S1.0 的 16.3 回落；0 NaN。同口径 CBIU 锚点（S1.0 语义首算）rich/null 三维全可分；预测路径零样本 decoder 复用近不可用（byte acc 0.099/BPB 10.1——decoder 未训该条件方向的下限读数，对比 H-Net 0.653 BPB 需训探针读头） | 已验证（单 seed，20K/512B 工程口径） | s11_mixedmask_20k（2026-08-05） |
 
 ## 4. 闸门注册表
 
@@ -250,6 +251,23 @@ v3.6 证据基座：S0 + A/B 对照（E17/E18）+ E23/E24/E26/E27 改造链（E2
   （练单字理解、避免养成高级 BPE；废 1-8B 随机 span），HNet-DiT 需同口径
   重跑、R2 需 Mamba-2 忠实版 H-Net（现仓复现主干为 causal transformer，
   已披露）。详见 `FLUED_TODO_20260805_CN.md` T1/T3。
+- 2026-08-05：**E28 混合口径主臂落地**（`s11_mixedmask_20k_20260805`，52 分钟/6.4
+  步每秒）：direct 0.789 / unmasked 0.782 / PPL 2.637 / masked 0.141——口径切换
+  零回退、三主项小幅上行；predict_cos 0.862（略降，观察）；state_norm 12.1 回落。
+  同口径 CBIU 锚点（S1.0 语义首算，`probe_v36_cbiu_anchors.py` 已适配）rich/null
+  三维全可分，GRPO 重跑前置备齐。预测路径零样本解码评测（`eval_v36_predict_decode.py`）：
+  byte acc 0.099/BPB 10.1——潜空间预测信息不能经零样本 decoder 复用直接读出
+  （下限口径），与 H-Net 0.653 BPB 的公平对比需训探针读头。HNet-DiT 瓶颈臂
+  同口径 20K 重跑启动（`train_hnet.py` 已加 `--mask-mode mixed`）。
+- 2026-08-05：**S0′′ 教师切换 DeepSeek 定案**（用户裁定停用 K2.5 后）：五轮 200 条
+  配对试点（对 K2.5 存量逐条对比）——flash 默认/降温均中文 2× 切粗（47-50B vs
+  锚 22.9B），ZH 警告修好中文（23.6B）却弄丢英文（40.6B），双语警告两边皆失
+  （指令稀释）；**v4-pro + 纯净规则双语言贴锚（ZH 23.8B/EN 26.5B vs 锚 23.6/29.8），
+  合格率 93% 超 K2.5 的 81.8%**（关思考、temp 0.2）。全量 8K 条标注启动
+  （seed 20260805 避开 K2.5 取样区间），合并时带来源字段。10 条 subagent 抽检
+  （`outputs/s05_pro_qa_spotcheck_20260805.md`）：9/10 无硬违规、1 条中文公文
+  3 处超 21 字硬违规；系统性瑕疵两宗——粒度只偏粗不偏碎、介词悬空跨样本 4/10
+  （建议 R7 补反例）；标点/换行/禁区 0 违反。
 - 2026-08-05：T3 混合 mask 代码落地（`train_v36_s1.py`：`--mask-mode mixed`
   默认，40% 整 UTF-8 字（1-3 字 span）+ 60% 整 BPE 词（128k 参照尺边界），
   `byte_span` 旧口径保留为开关；专用 CPU 生成器保证 eval mask 确定性；
