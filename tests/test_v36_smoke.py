@@ -32,6 +32,9 @@ def tiny_config(**overrides):
         max_span=8,
         bytes_per_chunk=8,
         max_positions=8,
+        # legacy path defaults (canonical defaults moved to per-chunk+dit in v36.2)
+        per_chunk_readout=False,
+        summarizer_type="slot",
     )
     base.update(overrides)
     return V36Config(**base)

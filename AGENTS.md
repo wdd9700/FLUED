@@ -60,6 +60,7 @@ Full project status: [README.md](README.md) · Versioned documentation: [docs/RE
 | `flued/v36/` | v3.6 KDA-generation mainline model (`FLUEDV36`) |
 | `flued/hnet_repro/` | H-Net reproduction baseline (BPB 0.653 anchor) |
 | `tools/train/v3_6/train_v36.py` | v3.6 train/eval entrypoint (`--config` eats `configs/canonical_v36.json`) |
+| `tools/train/v3_6/train_v36_s1.py` | v3.6 S1.0 three-task trainer (current canonical entrypoint, v36.2) |
 | `tools/train/v3_6/train_s0_segmentor.py` | S0 segmentor pretraining entrypoint |
 | `tools/train/v3_4/train_v34_pos_ar_probe.py` | v3.4 train/eval entrypoint |
 | `configs/v3_4/` | v3.4 reproducible experiment matrices |

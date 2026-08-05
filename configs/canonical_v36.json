@@ -1,8 +1,8 @@
 {
-  "canonical_version": "v36.1-20260731",
-  "evidence_base": "S0 segmentor 预训（F1 0.886 vs 教师标签）+ A/B 对照（docs/versions/v3.6/FLUED_V3_6_SPEC_20260725_CN.md §10）",
-  "supersedes": "configs/canonical_v35.json（v3.4 收尾系列旧口径，保留有效；v3.6 线以本文件为默认起点）",
-  "usage_note": "v3.6 当前默认训练基线：S0 预训 encoder+segmentor 冻结接管、动态边界、4× KDA 状态、k=1 readout 包、mask 原生两任务。data_path 为占位符，正式运行必须显式传 --data-path。",
+  "canonical_version": "v36.2-20260805",
+  "evidence_base": "S0′ K2.5 教师轮（E27：direct 0.772/unmasked 0.765/PPL 2.74）+ S0.8 DiT summarizer（E24）+ 逐段条件化（E23）+ S1.0 三任务拆分（E26）",
+  "supersedes": "configs/canonical_v36.json v36.1（S0 4B 教师前端 + slot summarizer + 均值通道，保留归档）；v35 旧口径保留有效",
+  "usage_note": "v3.6 当前默认：S0′ 预训 byte embedder+segmentor 冻结接管、DiT summarizer、逐段条件化读出、动态边界、4× KDA 状态；训练入口为 tools/train/v3_6/train_v36_s1.py（三任务：direct 保真/主干补全/潜空间预测）。data_path 为占位符，正式运行必须显式传 --data-path。",
   "run_id": "canonical_v36",
   "out_dir": "checkpoints/canonical_v36",
   "data_path": "data/corpus.txt",
@@ -67,6 +67,9 @@
   "milestone_every": 3000,
   "save_optimizer": true,
   "resume": true,
-  "init_checkpoint": "L:\\FLUED_archive\\s0_segmentor_sft_20260727\\latest.pt",
-  "freeze_prefixes": "byte_lookup,encoder_blocks,segmentor_blocks,segmentor_head"
+  "init_checkpoint": "L:\\FLUED_archive\\s0p_k25_v4_sft_20260805\\latest.pt",
+  "freeze_prefixes": "byte_lookup,encoder_blocks,segmentor_blocks,segmentor_head",
+  "per_chunk_readout": true,
+  "summarizer_type": "dit",
+  "summarizer_dit_layers": 2
 }

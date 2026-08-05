@@ -22,10 +22,11 @@
 
 机器可读源：`configs/canonical_v35.json`（canonical_version: `v35.1-20260717`，
 v3.4 收尾系列旧口径，保留有效）与 `configs/canonical_v36.json`
-（canonical_version: `v36.1-20260731`，**v3.6 线当前默认起点**：S0 预训
-encoder+segmentor 冻结接管、动态边界、4× KDA 状态、k=1 readout 包、
-mask 原生两任务）。v3.4 证据基座：v3.5 L0 两 seed 验证（E1）；
-v3.6 证据基座：S0 + A/B 对照（E17/E18）。
+（canonical_version: `v36.2-20260805`，**v3.6 线当前默认起点**：S0′ K2.5 教师
+预训 byte embedder+segmentor 冻结接管、DiT summarizer、逐段条件化读出、动态边界、
+4× KDA 状态、S1.0 三任务（direct 保真/主干补全/潜空间预测，训练入口
+`tools/train/v3_6/train_v36_s1.py`）。v3.4 证据基座：v3.5 L0 两 seed 验证（E1）；
+v3.6 证据基座：S0 + A/B 对照（E17/E18）+ E23/E24/E26/E27 改造链。
 
 | 项 | 当前默认 | 证据 |
 |---|---|---|
@@ -236,6 +237,10 @@ v3.6 证据基座：S0 + A/B 对照（E17/E18）。
   unmasked 0.765 / PPL 2.74 / masked 0.148——全面大胜旧 S0 前端（+16pp 级），
   用户粒度（23 段/21B）+ 语言学干净边界的组合兑现；旧 4B 教师标签退役，
   原 5K 纠偏重标判定不需要。规格 §20 补 S0′ 对照读数。
+- 2026-08-05：**canonical 切 v36.2-20260805**（用户裁定）：S0′ 前端接管 +
+  DiT summarizer + 逐段条件化 + S1.0 三任务设为默认（V36Config/argparse/
+  canonical_v36.json 三方已同步，训练入口 `train_v36_s1.py`）；S0′ 权重与
+  教师标签归档 `L:\FLUED_archive\s0p_k25_v4_sft_20260805`。
 - 2026-08-05：S0.8 完成（D0/D7，DiT summarizer 前后对比，归档
   `L:\FLUED_archive\s08_dit_summarizer_20260802`）：**E24 串联瓶颈遮蔽效应**——
   D0 均值通道下形态零差异，D7 逐段条件化下 unmasked 0.351→0.549（+19.8pp）、

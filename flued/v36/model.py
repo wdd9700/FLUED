@@ -35,7 +35,7 @@ except Exception:  # fla is optional (tests / non-GPU environments)
 
 @dataclass
 class V36Config:
-    """Defaults track configs/canonical_v36.json (v36.1-20260731)."""
+    """Defaults track configs/canonical_v36.json (v36.2-20260805)."""
 
     d_byte: int = 384
     encoder_layers: int = 3
@@ -67,8 +67,8 @@ class V36Config:
     boundary_temperature: float = 0.15
     boundary_bridge_gradient_scale: float = 0.1
     max_positions: int = 64
-    per_chunk_readout: bool = False
-    summarizer_type: str = "slot"
+    per_chunk_readout: bool = True
+    summarizer_type: str = "dit"
     summarizer_dit_layers: int = 2
     prefix_task: bool = False
     prefix_positions: int = 4
