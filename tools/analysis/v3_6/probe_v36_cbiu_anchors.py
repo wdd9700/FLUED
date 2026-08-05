@@ -8,15 +8,18 @@ Anchors are the two extreme write configurations on a frozen checkpoint:
   state stays zero and the readout package degenerates to a constant).
 
 Three paired risks are recomputed with identical bytes and masks per batch
-(bits per target byte):
+(bits per target byte), S1.0 three-task semantics (2026-08-05):
 
-* reconstruction_bpb: direct-path CE over all valid slots;
-* completion_bpb: backbone-path CE over masked slots;
-* preservation_bpb: backbone-path CE over unmasked slots.
+* reconstruction_bpb: direct-path CE over all valid slots against the
+  AS-ENCODED sequence (MASK_ID at masked slots — codec fidelity);
+* completion_bpb: backbone-path CE over masked slots (clean targets);
+* preservation_bpb: backbone-path CE over unmasked slots (clean targets).
 
-The JSON schema matches tools/train/v3_4/cbiu.py (modes + RISK_NAMES +
-null > rich separability check) so the anchor file loads through
-CBIUState.from_anchor_file unchanged.
+The mask generator follows the checkpoint's resolved config (``mask_mode``):
+``byte_span`` (legacy 1-8B random spans) or ``mixed`` (v36.3: 40% whole UTF-8
+chars + 60% whole BPE words). The JSON schema matches
+tools/train/v3_4/cbiu.py (modes + RISK_NAMES + null > rich separability
+check) so the anchor file loads through CBIUState.from_anchor_file unchanged.
 """
 
 from __future__ import annotations
@@ -38,10 +41,11 @@ if str(REPO_ROOT) not in sys.path:
 from flued.data import PAD_ID  # noqa: E402
 from tools.train.v3_3.train_v33 import make_byte_mask, make_dataloaders, make_targets  # noqa: E402
 from tools.train.v3_6.train_v36 import build_model  # noqa: E402
+import tools.train.v3_6.train_v36_s1 as s1  # noqa: E402
 
 LN2 = math.log(2.0)
 RISK_NAMES = ("reconstruction_bpb", "completion_bpb", "preservation_bpb")
-PROTOCOL = "CBIU_V36_BETA_ANCHORS_20260802"
+PROTOCOL = "CBIU_V36_BETA_ANCHORS_S1_20260805"
 MODES = ("rich_all_readouts", "null_fallback_only")
 MODE_BETA = {"rich_all_readouts": 1.0, "null_fallback_only": 0.0}
 MODE_SEMANTICS = {
@@ -86,26 +90,42 @@ def _run_mode(model, eval_loader, args, device, beta_value: float) -> RiskTotals
         return gates
 
     model.write_head.forward = patched_forward
+    mask_mode = getattr(args, "mask_mode", "byte_span")
     try:
         torch.manual_seed(args.eval_mask_seed)
         if device.type == "cuda":
             torch.cuda.manual_seed_all(args.eval_mask_seed)
+        s1._MASK_GENERATOR.manual_seed(args.eval_mask_seed)
         for batch_index, batch in enumerate(eval_loader):
             if batch_index >= args.max_eval_batches:
                 break
             clean = batch[0].to(device)
             valid = clean.ne(PAD_ID)
-            byte_mask = make_byte_mask(valid, args.mask_prob, args.mask_span_min, args.mask_span_max)
+            if mask_mode == "mixed":
+                byte_mask = s1.make_mixed_mask(
+                    clean.cpu(),
+                    args.mask_prob,
+                    char_frac=getattr(args, "mask_char_frac", 0.4),
+                    char_span_max=getattr(args, "mask_char_span_max", 3),
+                    tokenizer=s1._BPE_TOKENIZER,
+                    generator=s1._MASK_GENERATOR,
+                ).to(device)
+            else:
+                byte_mask = make_byte_mask(valid, args.mask_prob, args.mask_span_min, args.mask_span_max)
             source = clean.masked_fill(byte_mask, 257)  # MASK_ID
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
                 out = model(source)
             targets, slot_mask, masked_slot = make_targets(
                 clean, byte_mask, out.chunks.chunk_ids, out.chunks.offsets, args.max_chunks, args.max_span
             )
-            ce_direct = _ce_none(out.logits_direct, targets)
+            # as-encoded targets for the direct path (S1.0 fidelity semantics)
+            encoded_targets, encoded_slot_mask, _ = make_targets(
+                source, torch.zeros_like(byte_mask), out.chunks.chunk_ids, out.chunks.offsets, args.max_chunks, args.max_span
+            )
+            ce_direct = _ce_none(out.logits_direct, encoded_targets)
             ce_backbone = _ce_none(out.logits_backbone, targets)
             unmasked_slot = slot_mask & ~masked_slot
-            totals.add("reconstruction_bpb", ce_direct, slot_mask)
+            totals.add("reconstruction_bpb", ce_direct, encoded_slot_mask)
             totals.add("completion_bpb", ce_backbone, masked_slot)
             totals.add("preservation_bpb", ce_backbone, unmasked_slot)
             totals.chunks += float(out.chunks.chunk_mask.float().sum().item())
@@ -129,6 +149,10 @@ def main() -> None:
     config = json.loads(config_path.read_text(encoding="utf-8"))
     config.update(device=cli.device, max_eval_batches=cli.max_eval_batches, num_workers=0)
     args = Namespace(**config)
+    if getattr(args, "mask_mode", "byte_span") == "mixed":
+        s1._load_bpe_tokenizer(
+            getattr(args, "bpe_tokenizer_path", "checkpoints/bpe_tokenizer_128k_v4/tokenizer.json")
+        )
     device = torch.device(cli.device if cli.device == "cpu" or torch.cuda.is_available() else "cpu")
 
     payload = torch.load(checkpoint, map_location=device, weights_only=False)
@@ -155,6 +179,8 @@ def main() -> None:
         "config": str(config_path.resolve()),
         "max_eval_batches": cli.max_eval_batches,
         "eval_mask_seed": args.eval_mask_seed,
+        "mask_mode": getattr(args, "mask_mode", "byte_span"),
+        "risk_semantics": "S1.0: reconstruction=as-encoded fidelity, completion/preservation=backbone vs clean",
         "action_object": "beta_write_gate",
         "mode_semantics": MODE_SEMANTICS,
         "transmitted_scalars": args.readout_queries * args.d_pack,
