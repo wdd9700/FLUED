@@ -25,7 +25,9 @@ v3.4 收尾系列旧口径，保留有效）与 `configs/canonical_v36.json`
 （canonical_version: `v36.4-20260805`，**v3.6 线当前默认起点**：S0′ K2.5 教师
 预训 byte embedder+segmentor 冻结接管、DiT summarizer、逐段条件化读出、动态边界、
 4× KDA 状态、S1.0 三任务（direct 保真/主干补全/预测，训练入口
-`tools/train/v3_6/train_v36_s1.py`）、40/60 混合 mask 口径（40% 整 UTF-8 字 +
+`tools/train/v3_6/train_v36_s1.py`；**补全任务的 mask 散布整段 512B、主干对整张
+readout 矩阵全局补全、decoder 逐段还原全部字节，masked 仅指"遮蔽位计分"的评分
+口径；唯一严格绑定下一段的是预测任务**）、40/60 混合 mask 口径（40% 整 UTF-8 字 +
 60% 整 BPE 词，128k 参照尺边界；byte_span 经 `--mask-mode` 保留）、预测任务
 v2（`--predict-mode decode`：经冻结 decoder 字节级 CE，潜空间 MSE 降为 0.1
 弱风格锚）。v3.4 证据基座：v3.5 L0 两 seed 验证（E1）；
@@ -78,7 +80,7 @@ v3.6 证据基座：S0 + A/B 对照（E17/E18）+ E23/E24/E26/E27 改造链（E2
 | E26 | S1.0 三任务拆分（direct 保真 as-encoded / 补全仅主干路径 / 潜空间预测 stop-grad）：direct 0.610、补全 unmasked 0.597、PPL 5.24（三项历史最佳），predict_cos 0.896（主干做实预测）；masked 主干独占口径 0.138 未升——"masked 上限是任务难度非主干容量/角色"第三条独立证据 | 已验证（单 seed，20K/512B 工程口径） | s10_three_task_20k（2026-08-05） |
 | E27 | S0′（K2.5 教师/用户 21B 粒度/语言学干净边界）下游大胜：direct 0.610→0.772、unmasked 0.597→0.765、PPL 5.24→2.74（约 −48%），masked 0.148 历史最高（噪声带内）；段数 23.0 vs 17.6（传输 35K vs 27K 标量，部分增益来自率升）；predict_cos 持平。旧 4B 教师标签退役；原 5K 纠偏重标判定不需要 | 已验证（单 seed，20K/512B 工程口径） | s10p_s0p_20k（2026-08-05） |
 | E28 | 40/60 混合 mask 口径（v36.3）20K 主臂：direct 0.789 / unmasked 0.782 / PPL 2.637 / masked 0.141（±1pp 噪声带内持平 E27）——口径切换零回退、三主项小幅上行（+1.8pp/+1.7pp/−0.10）；predict_cos 0.862（较 E27 0.898 略降，列观察项）；state_norm 12.1 较 S1.0 的 16.3 回落；0 NaN。同口径 CBIU 锚点（S1.0 语义首算）rich/null 三维全可分；预测路径零样本 decoder 复用近不可用（byte acc 0.099/BPB 10.1——decoder 未训该条件方向的下限读数，对比 H-Net 0.653 BPB 需训探针读头） | 已验证（单 seed，20K/512B 工程口径） | s11_mixedmask_20k（2026-08-05） |
-| E29 | HNet-DiT 瓶颈臂 40/60 混合口径重跑（同 20K/512B/eval 集/种子）：masked 0.151 @ ~98K 标量（191 段，边界依旧退化过切 2.7B/段）vs FLUED v36.3 masked 0.141 @ ~36K 标量——masked 差 1.0pp 在噪声带内、传输省 2.7×；全位置 denoising acc 0.476 vs 我方 backbone 0.744。混合口径下 RD 前沿结论不变，对外对比口径已统一（masked 同"任务难度上限"读数又多一臂） | 已验证（单 seed，20K/512B 工程口径） | hnet_dit_bottleneck_mixed_20k（2026-08-05） |
+| E29 | HNet-DiT 瓶颈臂 40/60 混合口径重跑（同 20K/512B/eval 集/种子）：masked 0.151 @ ~98K 标量（191 段，边界依旧退化过切 2.7B/段）vs FLUED masked 0.141（E28，后 E30 刷新为 0.160）@ ~36K 标量——效率维度省 2.7×，E30 后绝对值也首次不落下风（+0.9pp 噪声带边缘）；全位置 denoising acc 0.476 vs 我方 backbone 0.791（E30）。混合口径下 RD 前沿结论不变且继续走强，对外对比口径已统一（masked 同"任务难度上限"读数又多一臂） | 已验证（单 seed，20K/512B 工程口径） | hnet_dit_bottleneck_mixed_20k（2026-08-05） |
 | E30 | S0′′ 扩量（K2.5 锚 1,285 + DeepSeek v4-pro 6,078 = 7,363 条、硬上限预筛、从零 SFT）下游全维度大胜 E28：direct 0.789→0.836（+4.6pp）、backbone 0.744→0.791（+4.7pp）、unmasked 0.782→0.830（+4.8pp）、PPL 2.64→2.25（−14.5%）、predict_cos 0.862→0.915；**masked 0.141→0.160（+1.9pp 破噪声带，历史新高——整字遮蔽+更好前端兑现单字理解）**；段数 23.5 持平（教师切换粒度零漂移）；state_norm 14.1 上行续观察；0 NaN。教师切换链路（K2.5→v4-pro）判定完全成功 | 已验证（单 seed，20K/512B 工程口径） | s12_s0pp_20k（2026-08-05） |
 
 ## 4. 闸门注册表
@@ -269,7 +271,8 @@ v3.6 证据基座：S0 + A/B 对照（E17/E18）+ E23/E24/E26/E27 改造链（E2
   `L:\FLUED_archive\hnet_dit_bottleneck_mixed_20k_20260805`。
 - 2026-08-05：HNet-DiT 标准臂（byte 旁路天花板）混合口径重跑完成：recon 0.958 /
   masked 0.288 / 边界依旧坍缩 1 chunk——天花板参照系在新口径下就位；混合口径
-  三方对比表齐：FLUED 0.141@36K / 瓶颈臂 0.151@98K / 标准臂（无压缩）0.288。
+  三方对比表齐：FLUED 0.141@36K / 瓶颈臂 0.151@98K / 标准臂（无压缩）0.288
+  （E30 后刷新为 FLUED 0.160@36K——绝对值也首次不落下风）。
 - 2026-08-05：**用户裁定四连（生成线设计）+ 预测任务 v2 落地**：① 预测任务改
   "冻结 decoder 监督"——backbone_out[i] 经冻结 decoder（functional_call 全参数
   detach，梯度只回主干）解第 i+1 段字节计 CE 为主损失，潜空间 MSE 降为 0.1
