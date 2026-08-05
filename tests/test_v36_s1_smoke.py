@@ -61,13 +61,18 @@ def test_s1_predict_decode_mode_frozen_decoder():
     args = types.SimpleNamespace(
         mask_prob=0.0, mask_span_min=1, mask_span_max=8, mask_mode="byte_span",
         max_chunks=4, max_span=8, task1_loss_weight=0.0, task2_loss_weight=0.0,
-        predict_weight=1.0, predict_mode="decode", predict_latent_weight=0.1, amp=False,
+        predict_weight=1.0, predict_mode="decode", predict_latent_weight=0.0, amp=False,
     )
     ids = torch.randint(1, 257, (2, 32))
     loss, metrics = step_model(model, (ids,), args, torch.device("cpu"), train=True)
     loss.backward()
     dec_grads = [p.grad for n, p in model.named_parameters() if n.startswith("decoder")]
     assert all(g is None or g.abs().sum() == 0 for g in dec_grads), "decoder must stay frozen"
+    # v2.1: predict CE consumes content.detach() -- the encoder/KDA side must
+    # see zero gradient from the predict branch (codec owns the representation)
+    for prefix in ("summarizer", "write_head", "state_machine", "encoder_blocks", "byte_lookup"):
+        enc_grads = [p.grad for n, p in model.named_parameters() if n.startswith(prefix)]
+        assert all(g is None or g.abs().sum() == 0 for g in enc_grads), f"{prefix} must stay untouched by predict CE"
     b_grads = [p.grad for n, p in model.named_parameters() if n.startswith("backbone")]
     assert any(g is not None and g.abs().sum() > 0 for g in b_grads), "backbone must receive predict gradients"
     assert "predict_ce" in metrics and metrics["predict_byte_acc"] >= 0.0

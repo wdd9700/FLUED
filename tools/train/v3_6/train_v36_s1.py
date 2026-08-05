@@ -7,13 +7,16 @@ Tasks (spec section 20, user-designed):
 2. backbone completion: readout -> backbone -> new matrix -> decoder restores
    the CLEAN text. Masked completion is ONLY scored on this path, so the
    backbone has an irreplaceable role (no more idling).
-3. backbone prediction: ``--predict-mode decode`` (v36.4 default) decodes
+3. backbone prediction: ``--predict-mode decode`` (v36.4+ default) decodes
    backbone_out[i] into chunk i+1's bytes through the FROZEN decoder
    (functional_call with detached params — gradients reach the backbone only,
    the decoder and shared byte table stay a fixed public ruler), plus a weak
    latent style anchor (MSE to decoder_in(content[i+1]).detach(), weight
-   ``--predict-latent-weight``). ``--predict-mode latent`` keeps the old
-   pure-MSE behaviour for historical runs.
+   ``--predict-latent-weight``). Since v2.1 the predict branch consumes
+   ``content.detach()``: predict CE trains the backbone only and can no longer
+   deform the encoder/KDA compressed representation (E31: full-gradient v2.0
+   collapsed the KDA state and destroyed the codec tasks).
+   ``--predict-mode latent`` keeps the old pure-MSE behaviour for historical runs.
 
 Metric redefinition (S1.0+): direct fidelity excludes nothing but MASK_ID
 positions are reported separately (trivially correct); masked acc is backbone
@@ -260,10 +263,15 @@ def step_model(model, batch, args, device, train: bool):
     predict_ce = torch.zeros((), device=device)
     predict_byte_acc = 0.0
     if predict_mode == "decode":
-        # frozen-decoder supervision: backbone_out[i] must be byte-legible as
-        # chunk i+1 through the fixed public ruler (decoder untouched)
+        # frozen-decoder supervision, v2.1: the predict branch consumes
+        # content.detach() -- predict CE trains the BACKBONE ONLY. s13 (E31)
+        # showed that letting this gradient reach the encoder/KDA side collapses
+        # the state (norm 1.7->0.3) and destroys the codec tasks: the compressed
+        # representation is owned by direct/completion, not by the predictor.
         pos = model.chunk_pos.weight.unsqueeze(0)[:, : chunks.chunk_mask.size(1)].float()
-        cond_pred = pred + pos[:, 1:]
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.amp and device.type == "cuda"):
+            backbone_pred = model.backbone(out["content"].detach())
+        cond_pred = backbone_pred.float()[:, :-1] + pos[:, 1:]
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.amp and device.type == "cuda"):
             logits_pred = _frozen_decoder_logits(model, cond_pred, chunks.token_mask[:, 1:])
         pred_w = slot_mask[:, 1:] & pair_mask.unsqueeze(-1).bool()
