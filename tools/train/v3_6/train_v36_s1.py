@@ -7,9 +7,13 @@ Tasks (spec section 20, user-designed):
 2. backbone completion: readout -> backbone -> new matrix -> decoder restores
    the CLEAN text. Masked completion is ONLY scored on this path, so the
    backbone has an irreplaceable role (no more idling).
-3. backbone prediction (fast latent path): MSE(backbone_out[i],
-   content[i+1].detach()) -- next-chunk latent prediction with stop-gradient
-   on the target. Bare run: no reweighting/crutches.
+3. backbone prediction: ``--predict-mode decode`` (v36.4 default) decodes
+   backbone_out[i] into chunk i+1's bytes through the FROZEN decoder
+   (functional_call with detached params — gradients reach the backbone only,
+   the decoder and shared byte table stay a fixed public ruler), plus a weak
+   latent style anchor (MSE to decoder_in(content[i+1]).detach(), weight
+   ``--predict-latent-weight``). ``--predict-mode latent`` keeps the old
+   pure-MSE behaviour for historical runs.
 
 Metric redefinition (S1.0+): direct fidelity excludes nothing but MASK_ID
 positions are reported separately (trivially correct); masked acc is backbone
@@ -198,6 +202,20 @@ def s1_forward(model, source: torch.Tensor, args) -> dict:
     }
 
 
+def _frozen_decoder_logits(model, cond: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
+    """Decoder forward with every parameter detached.
+
+    Gradients flow into ``cond`` (the backbone path) but never into the
+    decoder or the shared byte table: in predict-mode=decode the decoder is
+    a fixed public ruler that the backbone must learn to write for.
+    """
+    from torch.func import functional_call
+
+    params = {k: v.detach() for k, v in model.decoder.named_parameters()}
+    buffers = {k: v for k, v in model.decoder.named_buffers()}
+    return functional_call(model.decoder, (params, buffers), (cond, token_mask))
+
+
 def step_model(model, batch, args, device, train: bool):
     clean = batch[0].to(device)
     valid = clean.ne(PAD_ID)
@@ -234,10 +252,26 @@ def step_model(model, batch, args, device, train: bool):
     with torch.no_grad():
         tgt = model.decoder_in(out["content"].float())[:, 1:].detach()
     se = ((pred - tgt).square().mean(dim=-1) * pair_mask).sum() / pair_mask.sum().clamp(min=1.0)
-    predict_loss = se
     with torch.no_grad():
         cos = F.cosine_similarity(pred, tgt.float(), dim=-1)
         predict_cos = ((cos * pair_mask).sum() / pair_mask.sum().clamp(min=1.0)).item()
+
+    predict_mode = getattr(args, "predict_mode", "latent")
+    predict_ce = torch.zeros((), device=device)
+    predict_byte_acc = 0.0
+    if predict_mode == "decode":
+        # frozen-decoder supervision: backbone_out[i] must be byte-legible as
+        # chunk i+1 through the fixed public ruler (decoder untouched)
+        pos = model.chunk_pos.weight.unsqueeze(0)[:, : chunks.chunk_mask.size(1)].float()
+        cond_pred = pred + pos[:, 1:]
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.amp and device.type == "cuda"):
+            logits_pred = _frozen_decoder_logits(model, cond_pred, chunks.token_mask[:, 1:])
+        pred_w = slot_mask[:, 1:] & pair_mask.unsqueeze(-1).bool()
+        predict_ce = _ce(logits_pred, targets[:, 1:], pred_w)
+        predict_byte_acc = _safe_acc(logits_pred.argmax(dim=-1), targets[:, 1:], pred_w)
+        predict_loss = predict_ce + args.predict_latent_weight * se
+    else:
+        predict_loss = se
 
     loss = (
         args.task1_loss_weight * direct_loss
@@ -249,6 +283,8 @@ def step_model(model, batch, args, device, train: bool):
         "direct_loss": float(direct_loss.item()),
         "completion_loss": float(completion_loss.item()),
         "predict_loss": float(predict_loss.item()),
+        "predict_ce": float(predict_ce.item()),
+        "predict_byte_acc": float(predict_byte_acc),
         "direct_acc": _safe_acc(out["logits_direct"].argmax(dim=-1), encoded_targets, encoded_slot_mask),
         "backbone_acc": _safe_acc(out["logits_backbone"].argmax(dim=-1), targets, slot_mask),
         "backbone_masked_acc": _safe_acc(out["logits_backbone"].argmax(dim=-1), targets, masked_slot),
@@ -295,6 +331,8 @@ def main() -> None:
     pre_args, _ = pre.parse_known_args()
     parser = build_parser()
     parser.add_argument("--predict-weight", type=float, default=1.0)
+    parser.add_argument("--predict-mode", choices=["latent", "decode"], default="decode")
+    parser.add_argument("--predict-latent-weight", type=float, default=0.1)
     parser.add_argument("--mask-mode", choices=["byte_span", "mixed"], default="mixed")
     parser.add_argument("--mask-char-frac", type=float, default=0.4)
     parser.add_argument("--mask-char-span-max", type=int, default=3)

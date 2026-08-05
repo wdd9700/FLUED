@@ -44,6 +44,23 @@ E28 混合 mask 口径主臂：direct 0.789 / unmasked 0.782 / PPL 2.637 / maske
 - FlashKDA 补丁上游 issue（`L:\FLUED_archive\flashkda_msvc_patch_20260802\UPSTREAM_ISSUE_DRAFT_EN.md` 待提交）。
 - push 状态：main 已被 HEAD（b799c39，v36.2）强制覆盖（2026-08-05，第 4 次重试成功）；分支与 main 同点。
 
+## 4. 生成线与容量阶梯（2026-08-05 用户裁定）
+
+**生成式矩阵模型（翻页）**：实际运用形态是主干在全新 latent 矩阵上生成回复，接近/达到矩阵承载上限（当前 512B，后期 1024B）就切入全新矩阵；新 prompt 输入即新矩阵。预测路径的字节可读性是硬前置（见下）。
+
+**已落地**：预测任务 v2（v36.4）——`--predict-mode decode`：backbone_out[i] 经**冻结 decoder**（functional_call 全参数 detach，梯度只回主干）解第 i+1 段字节计 CE 为主损失；潜空间 MSE 降为 0.1 弱风格锚（保主干输出风格与 encoder 一致）；predict_byte_acc 成为日常指标。
+
+**翻页信号（先实测后决定）**：延长前缀衰减曲线到 64/128 段，分域（代码/文本/数学）测最优翻页点方差——方差小则字节预算翻页（保守执行），方差大才上门控 MLP（3 层，决定 encoding/生成何时切新矩阵，适配不同信息密度）。
+
+**容量消融矩阵（各轴独立、全部从零，segmentor 从 S0′′ 快照接管；1x 已有=当前值，看拐点定组件比例，不拍脑袋）**：
+| 轴 | 当前 1x | 待测点 | 备注 |
+|---|---|---|---|
+| backbone 主干 | 4.76M | 30M（后期 100M 须配任务升级/冻结 codec 验证通用性） | 最优先，生成线核心 |
+| decoder | 6.5M | 1.5x（~9.7M）/ 2x（~13M） | 所有任务的最终裁判，不能是瓶颈/残差截流者 |
+| write_head 写入头 | 2.1M | 加宽（interpreter 合计目标 ~10M 量级内定） | memory→KDA 唯一翻译器 |
+| summarizer | 5.06M | 重测容量探针后再定（E22 旧形态零效应，勿按旧直觉直接加） | 最后动 |
+- 预算与入口：均为 train_v36_s1.py + canonical 改单轴 + 20K/512B，对照 E28。
+
 ## 3. 环境速查
 
 - 训练：`C:\Users\74090\Miniconda3\envs\soulvlm\python.exe`（直接调，勿 conda run）；测试/绘图：`py -3.14`；内核：`kda-kernels` 环境（需 PYTHONUTF8=1）。
