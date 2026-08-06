@@ -3,10 +3,19 @@
 > 单一事实源 `docs/CURRENT_STATE.md`；术语 `docs/TERMS.md`；主线规格 `docs/versions/v3.6/FLUED_V3_6_SPEC_20260725_CN.md`（§1-§20）。
 > 本文是当前待办快照。canonical：**v36.2-20260805**（S0′ 前端 + DiT summarizer + 逐段读出 + S1.0 三任务，训练入口 `tools/train/v3_6/train_v36_s1.py`）。
 
-## 0. 当前最强数字（v36.3，20K/512B/单 seed）
+## 0. 当前最强数字（v36.3-attn 时代，20K/512B/单 seed）
 
-**E30（S0′′ 前端）**：direct 0.836 / unmasked 0.830 / backbone 0.791 / PPL 2.25 / masked 0.160（破噪声带历史新高）/ predict_cos 0.915 / 段数 23.5。较 E28（S0′）+4.6~4.8pp、PPL −14.5%。
-归档 `L:\FLUED_archive\s12_s0pp_20k_20260805`。v36.4 预测 v2 验证臂（s13）在跑。
+**E30（S0′′ 前端，attn 主干，目前仍是最强基线）**：direct 0.836 / unmasked 0.830 / backbone 0.791 / PPL 2.25 / masked 0.160 / predict_cos 0.915 / 段数 23.5。
+归档 `L:\FLUED_archive\s12_s0pp_20k_20260805`。
+v36.4/v36.5 三臂（s13 预测 v2.0 / s14 per-readout+锚0.1 / s14b per-readout+锚1.0）全部负结果（E31/E32），attn 主干 + E30 配置仍是当前基线。
+
+## 0.1 基线裁定（压缩后第一议题，三选一）
+
+E32 已钉死机制：attn 主干是 encoder 的稠密协同监督器（每位置 ~23 份跨段补全梯度），per-readout 逐点后只剩 1 份，encoder 必退化；锚权重在逐点形态下无可用区间（0.1 饿死 / 1.0 state 爆炸 270）。
+- **选项① attn 回退**：承认 per-readout 判死，按 E30 基线直接推进容量消融/GRPO/翻页曲线。最稳。
+- **选项② causal 注意力变体**：主干吃上三角 mask（只看过去段）——既保"训练=流式生成"的因果一致，又恢复跨段监督密度。理论最优折中，需一臂验证（direct 能否回 0.8 量级）。
+- **选项③ per-readout + 新协同通道**：超出范围冻结，不建议当前做。
+队列中容量消融/GRPO/翻页曲线三项**暂停**，待基线裁定后按新基线重排。
 
 ## 1. 讨论已定论项（2026-08-05 与用户讨论）
 

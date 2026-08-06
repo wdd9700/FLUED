@@ -56,7 +56,7 @@ class V36Config:
     backbone_layers: int = 3
     backbone_nhead: int = 8
     backbone_ffn: int = 1024
-    backbone_mode: str = "mlp"  # "mlp" = per-readout (v36.5 default); "attn" = legacy cross-chunk attention
+    backbone_mode: str = "attn"  # "attn" = cross-chunk attention (default; E30 baseline). "mlp" = per-readout, JUDGED DEAD by E32 (encoder gradient starvation / anchor blowup) -- retained behind the flag for the causal-attention follow-up.
     decoder_hidden: int = 1024
     decoder_layers: int = 3
     max_chunks: int = 64

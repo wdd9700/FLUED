@@ -208,7 +208,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backbone-layers", type=int, default=3)
     parser.add_argument("--backbone-nhead", type=int, default=8)
     parser.add_argument("--backbone-ffn", type=int, default=1024)
-    parser.add_argument("--backbone-mode", choices=["attn", "mlp"], default="mlp")
+    parser.add_argument("--backbone-mode", choices=["attn", "mlp"], default="attn")
     parser.add_argument("--decoder-hidden", type=int, default=1024)
     parser.add_argument("--decoder-layers", type=int, default=3)
     parser.add_argument("--max-chunks", type=int, default=64)

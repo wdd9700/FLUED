@@ -221,14 +221,14 @@ def test_kda_fla_parity():
 
 
 def test_pointwise_backbone_is_per_readout():
-    """v36.5: default backbone is per-readout (mlp) -- output row i must depend
-    only on input row i, so chunk permutation permutes outputs identically."""
+    """mlp mode (E32: judged dead, retained behind flag): output row i must
+    depend only on input row i, so chunk permutation permutes outputs."""
     torch.manual_seed(0)
-    model = FLUEDV36(tiny_config())
+    model = FLUEDV36(tiny_config(backbone_mode="mlp"))
     from flued.v36.model import PointwiseBackbone, TinyBackbone
 
     assert isinstance(model.backbone, PointwiseBackbone)
-    assert isinstance(FLUEDV36(tiny_config(backbone_mode="attn")).backbone, TinyBackbone)
+    assert isinstance(FLUEDV36(tiny_config()).backbone, TinyBackbone)  # default = attn (E32)
     x = torch.randn(2, 4, 64)
     with torch.no_grad():
         out = model.backbone(x)
