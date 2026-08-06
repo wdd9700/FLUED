@@ -22,21 +22,24 @@
 
 机器可读源：`configs/canonical_v35.json`（canonical_version: `v35.1-20260717`，
 v3.4 收尾系列旧口径，保留有效）与 `configs/canonical_v36.json`
-（canonical_version: `v36.6-20260806`，**v3.6 线当前默认起点**：S0′′ 双源教师
+（canonical_version: `v36.7-20260806`，**v3.6 线当前默认起点**：S0′′ 双源教师
 预训 byte embedder+segmentor 冻结接管、DiT summarizer、逐段条件化读出、动态边界、
 4× KDA 状态、S1.0 三任务（direct 保真/主干补全/预测，训练入口
 `tools/train/v3_6/train_v36_s1.py`；**补全任务的 mask 散布整段 512B、主干对每段
 readout 独立补全、decoder 逐段还原全部字节，masked 仅指"遮蔽位计分"的评分
 口径；唯一严格绑定下一段的是预测任务**）、40/60 混合 mask 口径（40% 整 UTF-8 字 +
-60% 整 BPE 词，128k 参照尺边界；byte_span 经 `--mask-mode` 保留）、预测任务
-v2（`--predict-mode decode`：经冻结 decoder 字节级 CE，潜空间 MSE 降为 0.1
-弱风格锚；v2.1 起预测分支 encoder 侧 detach）、**主干 `attn`（E32 裁定：
-per-readout/mlp 形态判死——encoder 监督密度饥荒，attn 是 encoder 的稠密
-协同监督器；mlp 保留开关，causal-attn 变体为候选后续，基线三选项见
-`FLUED_TODO_20260805_CN.md` §0.1）**、**KDA 训练核默认 fla chunk_kda**
-（v36.6，E33：23 段口径 +15% 步速、parity 已验证，torch 串行保留为回退/调试）、
-**R1 相对基线形态 `state_channel` 开关就绪**（off=无串行状态通道，
-规格 §4 消融臂）。v3.4 证据基座：v3.5 L0 两 seed 验证（E1）；
+60% 整 BPE 词，128k 参照尺边界；byte_span 经 `--mask-mode` 保留）、**预测任务
+回潜空间 MSE（`--predict-mode latent`，E30 配方——v2 冻结 decoder 字节 CE
+在双向 attn 主干下因复制捷径判负（E34：predict_cos 0.998=照抄，direct 0.377
+vs latent 0.832 单变量判别）；v2.1 encoder 侧 detach 连带拆掉了 E30 时代
+encoder 的预测侧协同监督；predict_byte_acc 保留为评测指标**）、**主干 `attn`
+（E32 对 per-readout/mlp 的判死受 v2.1 体制污染——s14/s14b 均为 mlp+v2.1，
+判决暂停，mlp+latent 重审臂 s17 在跑；causal-attn 变体动机从"保监督密度"
+改写为"拆掉复制捷径"，见 `FLUED_TODO_20260805_CN.md` §0.1）**、
+**KDA 训练核默认 fla chunk_kda**（v36.6 起，E33：parity 与 20K 复现已验证，
+torch 串行保留为回退/调试）、**R1 相对基线形态 `state_channel` 开关**
+（off=无串行状态通道，规格 §4 消融臂；健康体制判决对 = s16 vs s18）。
+v3.4 证据基座：v3.5 L0 两 seed 验证（E1）；
 v3.6 证据基座：S0 + A/B 对照（E17/E18）+ E23/E24/E26/E27 改造链（E27 及之前
 数字均为 byte_span 口径；E28 起混合口径；E28/E30 的补全数字为 attn 主干时代）。
 
@@ -89,8 +92,9 @@ v3.6 证据基座：S0 + A/B 对照（E17/E18）+ E23/E24/E26/E27 改造链（E2
 | E29 | HNet-DiT 瓶颈臂 40/60 混合口径重跑（同 20K/512B/eval 集/种子）：masked 0.151 @ ~98K 标量（191 段，边界依旧退化过切 2.7B/段）vs FLUED masked 0.141（E28，后 E30 刷新为 0.160）@ ~36K 标量——效率维度省 2.7×，E30 后绝对值也首次不落下风（+0.9pp 噪声带边缘）；全位置 denoising acc 0.476 vs 我方 backbone 0.791（E30）。混合口径下 RD 前沿结论不变且继续走强，对外对比口径已统一（masked 同"任务难度上限"读数又多一臂） | 已验证（单 seed，20K/512B 工程口径） | hnet_dit_bottleneck_mixed_20k（2026-08-05） |
 | E30 | S0′′ 扩量（K2.5 锚 1,285 + DeepSeek v4-pro 6,078 = 7,363 条、硬上限预筛、从零 SFT）下游全维度大胜 E28：direct 0.789→0.836（+4.6pp）、backbone 0.744→0.791（+4.7pp）、unmasked 0.782→0.830（+4.8pp）、PPL 2.64→2.25（−14.5%）、predict_cos 0.862→0.915；**masked 0.141→0.160（+1.9pp 破噪声带，历史新高——整字遮蔽+更好前端兑现单字理解）**；段数 23.5 持平（教师切换粒度零漂移）；state_norm 14.1 上行续观察；0 NaN。教师切换链路（K2.5→v4-pro）判定完全成功 | 已验证（单 seed，20K/512B 工程口径） | s12_s0pp_20k（2026-08-05） |
 | E31 | 预测 v2.0（冻结 decoder CE 全通梯度）**负结果**：state_norm 开局 1.7→0.3 崩塌（KDA 状态机被"关闭"），codec 全面退化（direct 0.608/backbone 0.366/PPL 12.4 vs E30 的 0.836/0.791/2.25）；predict_byte_acc 0.37 是崩塌状态上的空心数字。根因：预测 CE 梯度倒灌 encoder/KDA 侧，把压缩表征往"好预测"拧、牺牲保真——**压缩表征的所有权归 codec 任务**。对策 v2.1：预测分支吃 content.detach()，预测 CE 只训主干 | 已验证（负结果，单 seed，20K/512B） | s13_s0pp_predv2_20k（2026-08-05） |
-| E32 | per-readout 主干当前形态**判死**（两臂判别）：s14（锚 0.1）direct 0.542/PPL 9.5、state_norm 健康——encoder 监督密度饥荒；s14b（锚 1.0）direct 0.059、state_norm 4-8K 步间 10.7→235 爆炸（grad norm 177）——锚在逐点形态弱则饿死、强则爆炸，无可用区间。机制：attn 主干的补全梯度让 encoder 每位置吃 ~23 份跨段监督，逐点后只剩 1 份——**attn 主干是 encoder 的稠密协同监督器，不只是补全器**。基线裁定三选项（待用户）：① attn 回退按 E30 基线推进；② causal 注意力变体（只看过去段，保因果+恢复跨段监督密度）；③ per-readout 保留+新开 encoder 协同通道（超出范围冻结） | 已验证（单 seed，20K/512B 工程口径） | s14/s14b（2026-08-05） |
-| E33 | 训练/推理效率优化轮（用户裁定提前，为 R1/R0 铺路）：① 训练指标免同步（每步 ~19 次 .item() 同步消除）4.31→4.78 步/s（+11%）；② KDA 训练核默认 fla chunk_kda → 5.49 步/s（累计 +27%，300 步探针口径；轨迹/精度 parity 达标：direct 0.230 vs 0.229）；③ batch 16 触发 PCIe 换页判死（0.47 步/s——显存分配超红线走系统内存，batch 8 维持协议）；④ 推理侧流式原语 `stream_step`（增量状态 O(C²)→O(C)）与批式逐列一致（torch 1e-5 / fla 5e-2 容差内）；⑤ R0 KDA-LM 3:1 模块+训练器落地（臂 A d512/L12/ffn1792=48.21M、臂 B d448/L16/ffn1536≈47.3M，对齐 FLUED 全栈 47.2M；因果性/参数量/反传测试全过） | 已验证（工程口径） | 探针 `_perf_probe_*`（2026-08-06） |
+| E32 | per-readout 主干判死（两臂）：s14（锚 0.1）direct 0.542、s14b（锚 1.0）state_norm 爆炸 270——**但 2026-08-06 E34 查明 s14/s14b 均在 v2.1 中毒体制下运行（mlp+v2.1 是该形态唯一被测过的组合），判死结论受污染、暂停生效；mlp+latent 干净重审臂 s17 在跑**。原机制叙事（attn=encoder 稠密协同监督器、每位置 ~23 份跨段监督）降级为候选，待 s17 裁决 | 候选（体制污染，重审中） | s14/s14b（2026-08-05），污染查明 2026-08-06 |
+| E33 | 训练/推理效率优化轮（用户裁定提前，为 R1/R0 铺路）：① 训练指标免同步；② KDA 训练核默认 fla chunk_kda（parity 达标；s16 以 fla 复现 E30 全指标噪声带内，核无罪铁证）；③ batch 16 触发 PCIe 换页判死（0.47 步/s，batch 8 维持协议）；④ 推理侧流式原语 `stream_step`（增量状态 O(C²)→O(C)）与批式逐列一致；⑤ R0 KDA-LM 3:1 模块+训练器落地（臂 A 48.21M/臂 B ≈47.3M 对齐 47.2M）。**速度修正：20K 全程口径 fla+免同步 6.34 步/s ≈ 旧码 6.4（E28）——23 段尺度 KDA 串行非瓶颈，300 步探针的 +27% 是启动开销伪影；fla 真实价值在字节级长度（R0 使能）与长序列** | 已验证（工程口径） | 探针 `_perf_probe_*` + s15/s16 全程（2026-08-06） |
+| E34 | **预测 v2.1（冻结 decoder 字节 CE + encoder detach）在双向 attn 主干下是训练毒药**：复制捷径——predict_cos 0.998（照抄下一段而非预测），s15 direct 0.377/backbone 0.314/PPL 16.2；同码同核仅换 `--predict-mode latent` 即全指标复现 E30（s16：direct 0.832/backbone 0.785/PPL 2.30/masked 0.152/predict_cos 0.903/state_norm 14.0 vs E30 0.836/0.791/2.25/0.160/0.915/14.1）——单变量判别，v2.1 有罪、fla 无罪。机制：双向注意力下字节 CE 教主干抄 content[i+1]，腐烂的主干经共享 decoder 与补全梯度带坏 encoder；v2.1 的 detach 同时拆掉了 E30 时代预测侧给 encoder 的协同监督。预测字节 CE 作为训练损失在双向体制判负（causal 主干下是否复活待测），predict_byte_acc 保留为评测指标。canonical 切 v36.7（预测默认回 latent） | 已验证（单变量判别+复现，单 seed 工程口径） | s15/s15b/s16（2026-08-06） |
 
 ## 4. 闸门注册表
 
@@ -390,3 +394,16 @@ v3.6 证据基座：S0 + A/B 对照（E17/E18）+ E23/E24/E26/E27 改造链（E2
   `tools/train/v3_6/train_kda_lm.py` 与 H-Net 复现同协议，BPB 口径；
   因果性/参数量/反传测试 GPU 全过）。测试 171+4 全绿。
   R1 双臂（s15 主臂重跑 + s15b 无状态通道臂）启动，E30 作复现锚。
+- 2026-08-06：**E34 体制定案——预测 v2.1 在双向 attn 下是毒药，fla 核无罪**。
+  R1 首对（v36.6+v2.1 体制）：s15 主臂 direct 0.377/PPL 16.2/predict_cos 0.998
+  **未复现 E30**；s15b（无状态）direct 0.298/PPL 28.1——中毒体制下状态通道
+  方向仍为正（+8pp）但不作正式判决。判别臂 s16（仅换 `--predict-mode latent`，
+  fla 不动）：direct 0.832/backbone 0.785/PPL 2.30/masked 0.152/predict_cos
+  0.903/state_norm 14.0——**与 E30 全指标噪声带内，单变量判别 v2.1 有罪**
+  （复制捷径：双向注意力照抄 content[i+1]，经共享 decoder 与补全梯度带坏
+  encoder；detach 同时拆掉了预测侧给 encoder 的协同监督）。**canonical 切
+  v36.7-20260806（预测默认回 latent）**；E32 对 per-readout 的判死因体制污染
+  暂停生效（s14/s14b 均为 mlp+v2.1），干净重审臂 s17（mlp+latent）与 R1 健康
+  体制判决臂 s18（attn+latent+无状态，对照 s16）在跑。E33 速度修正：20K 全程
+  口径新旧码持平（6.34 vs 6.4 步/s），+27% 为探针启动伪影，fla 价值在字节级
+  长度与 R0 使能。R0（KDA-LM 3:1）顺延至归因链闭环后。

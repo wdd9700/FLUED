@@ -353,7 +353,7 @@ def main() -> None:
     pre_args, _ = pre.parse_known_args()
     parser = build_parser()
     parser.add_argument("--predict-weight", type=float, default=1.0)
-    parser.add_argument("--predict-mode", choices=["latent", "decode"], default="decode")
+    parser.add_argument("--predict-mode", choices=["latent", "decode"], default="latent")
     parser.add_argument("--predict-latent-weight", type=float, default=0.1)
     parser.add_argument("--mask-mode", choices=["byte_span", "mixed"], default="mixed")
     parser.add_argument("--mask-char-frac", type=float, default=0.4)

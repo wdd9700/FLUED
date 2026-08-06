@@ -74,6 +74,13 @@ Full project status: [README.md](README.md) · Versioned documentation: [docs/RE
 - **E1 presets**: `smoke_cpu`, `small_gpu`, `class300m_16gb` — defined in `flued/e1_stage_a.py`
 - **skip_hard**: Always pass `skip_hard=True` during training/eval. Hard segmentation is for logging only.
 
+## 协作协议（2026-08-06 与用户共同制定）
+
+1. **假设先行，不直接裁定**：用户给出观察/直觉/验证方式/推理链，AI 登记为编号候选假设（与证据状态机同构：候选 → 已验证/已证伪），并设计最便宜的可证伪臂；证据落地后才改默认值。架构级"裁定"一律走此流程，不跳级。
+2. **凭证管理**：API token 一律经 repo 外文件或 KMS 引用，永不进对话/文档/commit；已暴露的立即轮换。
+3. **高带宽消息**：单条消息多决策多问题是正常形态（强模型协作的必然）；AI 的职责是解析成清单逐项跟踪，单条消息行动项超过三个时先复述清单再执行。
+4. **中断协议**：用户以软暂停（Ctrl+S 或普通排队消息）代替 Esc 硬中断；AI 收到暂停信号后执行固定收尾——安全停/等 GPU 任务 → 当前状态原地入文档 → 交还控制权。
+
 ## ⚠️ Critical Pitfalls
 
 1. **Never use wildcards to delete checkpoints.** Always list and verify exact paths first. Keep the latest checkpoint and analysis milestones.
