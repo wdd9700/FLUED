@@ -87,6 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", default="kda_lm_r0")
     parser.add_argument("--out-dir", default="checkpoints/kda_lm_r0")
     parser.add_argument("--data-path", default="")
+    parser.add_argument("--data-manifest", default="")
     parser.add_argument("--streaming-train", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--streaming-eval", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--stream-samples-per-worker", type=int, default=50000)
