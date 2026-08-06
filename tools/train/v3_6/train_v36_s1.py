@@ -205,6 +205,17 @@ def s1_forward(model, source: torch.Tensor, args) -> dict:
     }
 
 
+def _acc_tensor(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Sync-free accuracy as a GPU scalar tensor (0.0 on empty mask).
+
+    Training-loop metrics stay on device and are only synced at log time;
+    calling ``.item()``/``float()`` per step (~19 metrics) serializes the
+    CPU/GPU pipeline and costs real throughput at small batch sizes.
+    """
+    m = mask.float()
+    return (pred.eq(target).float() * m).sum() / m.sum().clamp(min=1.0)
+
+
 def _frozen_decoder_logits(model, cond: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
     """Decoder forward with every parameter detached.
 
@@ -257,11 +268,11 @@ def step_model(model, batch, args, device, train: bool):
     se = ((pred - tgt).square().mean(dim=-1) * pair_mask).sum() / pair_mask.sum().clamp(min=1.0)
     with torch.no_grad():
         cos = F.cosine_similarity(pred, tgt.float(), dim=-1)
-        predict_cos = ((cos * pair_mask).sum() / pair_mask.sum().clamp(min=1.0)).item()
+        predict_cos = (cos * pair_mask).sum() / pair_mask.sum().clamp(min=1.0)
 
     predict_mode = getattr(args, "predict_mode", "latent")
     predict_ce = torch.zeros((), device=device)
-    predict_byte_acc = 0.0
+    predict_byte_acc = torch.zeros((), device=device)
     if predict_mode == "decode":
         # frozen-decoder supervision, v2.1: the predict branch consumes
         # content.detach() -- predict CE trains the BACKBONE ONLY. s13 (E31)
@@ -276,7 +287,7 @@ def step_model(model, batch, args, device, train: bool):
             logits_pred = _frozen_decoder_logits(model, cond_pred, chunks.token_mask[:, 1:])
         pred_w = slot_mask[:, 1:] & pair_mask.unsqueeze(-1).bool()
         predict_ce = _ce(logits_pred, targets[:, 1:], pred_w)
-        predict_byte_acc = _safe_acc(logits_pred.argmax(dim=-1), targets[:, 1:], pred_w)
+        predict_byte_acc = _acc_tensor(logits_pred.argmax(dim=-1), targets[:, 1:], pred_w)
         predict_loss = predict_ce + args.predict_latent_weight * se
     else:
         predict_loss = se
@@ -286,25 +297,28 @@ def step_model(model, batch, args, device, train: bool):
         + args.task2_loss_weight * completion_loss
         + args.predict_weight * predict_loss
     )
+    # Metrics stay on device (detached scalars); the training loop accumulates
+    # them and only syncs to host at log time -- per-step .item() calls on
+    # ~19 metrics were serializing the pipeline.
     metrics = {
-        "loss": float(loss.item()),
-        "direct_loss": float(direct_loss.item()),
-        "completion_loss": float(completion_loss.item()),
-        "predict_loss": float(predict_loss.item()),
-        "predict_ce": float(predict_ce.item()),
-        "predict_byte_acc": float(predict_byte_acc),
-        "direct_acc": _safe_acc(out["logits_direct"].argmax(dim=-1), encoded_targets, encoded_slot_mask),
-        "backbone_acc": _safe_acc(out["logits_backbone"].argmax(dim=-1), targets, slot_mask),
-        "backbone_masked_acc": _safe_acc(out["logits_backbone"].argmax(dim=-1), targets, masked_slot),
-        "backbone_unmasked_acc": _safe_acc(out["logits_backbone"].argmax(dim=-1), targets, unmasked_slot),
-        "predict_cos": predict_cos,
-        "mask_rate": float(byte_mask.float().sum().item() / valid.float().sum().clamp(min=1.0).item()),
-        "truncated_tokens": float(chunks.pack_info["truncated_tokens"].float().sum().item()),
-        "cut_capacity_overflow": float(out["cut_overflow"].float().sum().item()),
-        "chunks_per_sample": float(chunks.chunk_mask.float().sum(dim=1).mean().item()),
-        "hard_cut_fraction": float(out["hard_cut_fraction"].item()),
-        "state_norm": float(out["state_norm"].item()),
-        "boundary_confidence_mean": float(out["boundary_confidence_mean"].item()),
+        "loss": loss.detach(),
+        "direct_loss": direct_loss.detach(),
+        "completion_loss": completion_loss.detach(),
+        "predict_loss": predict_loss.detach(),
+        "predict_ce": predict_ce.detach(),
+        "predict_byte_acc": predict_byte_acc.detach(),
+        "direct_acc": _acc_tensor(out["logits_direct"].argmax(dim=-1), encoded_targets, encoded_slot_mask),
+        "backbone_acc": _acc_tensor(out["logits_backbone"].argmax(dim=-1), targets, slot_mask),
+        "backbone_masked_acc": _acc_tensor(out["logits_backbone"].argmax(dim=-1), targets, masked_slot),
+        "backbone_unmasked_acc": _acc_tensor(out["logits_backbone"].argmax(dim=-1), targets, unmasked_slot),
+        "predict_cos": predict_cos.detach(),
+        "mask_rate": (byte_mask.float().sum() / valid.float().sum().clamp(min=1.0)).detach(),
+        "truncated_tokens": chunks.pack_info["truncated_tokens"].float().sum().detach(),
+        "cut_capacity_overflow": out["cut_overflow"].float().sum().detach(),
+        "chunks_per_sample": chunks.chunk_mask.float().sum(dim=1).mean().detach(),
+        "hard_cut_fraction": out["hard_cut_fraction"].detach(),
+        "state_norm": out["state_norm"].detach(),
+        "boundary_confidence_mean": out["boundary_confidence_mean"].detach(),
     }
     return loss, metrics
 
@@ -321,7 +335,7 @@ def evaluate(model, eval_loader, args, device):
         if i >= args.max_eval_batches:
             break
         _, metrics = step_model(model, batch, args, device, train=False)
-        rows.append(metrics)
+        rows.append({k: float(v) for k, v in metrics.items()})
     model.train()
     merged = {}
     for key in rows[0]:
@@ -409,12 +423,14 @@ def main() -> None:
     t0 = time.time()
     nan_skips = 0
     step = start_step
+    pending: dict[str, torch.Tensor] = {}
+    pending_n = 0
     while step < args.max_steps:
         for batch in train_loader:
             if step >= args.max_steps:
                 break
             loss, metrics = step_model(model, batch, args, device, train=True)
-            if not torch.isfinite(loss):
+            if not bool(torch.isfinite(loss)):
                 nan_skips += 1
                 opt.zero_grad(set_to_none=True)
                 step += 1
@@ -426,6 +442,9 @@ def main() -> None:
             opt.step()
             sched.step()
             step += 1
+            for k, v in metrics.items():
+                pending[k] = pending[k] + v if k in pending else v.clone()
+            pending_n += 1
             if step % args.log_every == 0 or step == 1:
                 row = {
                     "step": step,
@@ -433,9 +452,11 @@ def main() -> None:
                     "grad": float(grad.item()),
                     "steps_per_sec": step / max(time.time() - t0, 1e-9),
                     "nan_skips": nan_skips,
-                    **metrics,
+                    **{k: float((v / pending_n).item()) for k, v in pending.items()},
                 }
                 _append_jsonl(log_path, row)
+                pending = {}
+                pending_n = 0
             if step % args.ckpt_every == 0:
                 payload = {"step": step, "model": model.state_dict(), "args": vars(args)}
                 if args.save_optimizer:

@@ -12,6 +12,7 @@ integration is a later acceleration step).
 from __future__ import annotations
 
 from dataclasses import dataclass
+import warnings
 
 import torch
 from torch import nn
@@ -73,7 +74,12 @@ class V36Config:
     summarizer_dit_layers: int = 2
     prefix_task: bool = False
     prefix_positions: int = 4
-    kda_impl: str = "torch"
+    kda_impl: str = "fla"  # fla chunk_kda fused kernel (default since v36.6: +15% steps/s at 23 chunks, parity-verified; essential at byte-level lengths for R0). "torch" serial loop retained as fallback.
+    # R1 relative baseline (spec section 4): when False, each chunk's readout
+    # comes straight from its own write (same write head, same realign, same
+    # transmitted-scalar budget) -- the serial KDA recurrence is bypassed, so
+    # the ONLY difference from the main architecture is the state channel.
+    state_channel: bool = True
 
 
 @dataclass
@@ -187,10 +193,22 @@ class KDAStateMachine(nn.Module):
         )
 
     def forward(self, gates: dict[str, torch.Tensor], chunk_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.c.state_channel:
+            # R1 relative baseline: bypass the recurrence entirely -- readout
+            # per chunk comes from its own write value only. Padded rows are
+            # garbage but masked downstream exactly like the main path's
+            # stale-state reads, so the comparison stays clean.
+            v = gates["v"]
+            read = v.reshape(v.size(0), v.size(1), 1, self.c.kda_heads * self.c.kda_head_v)
+            return self.realign(read), v.new_zeros((), dtype=torch.float32)
         if self.c.kda_impl == "fla":
             if _fla_chunk_kda is None:
-                raise RuntimeError("kda_impl='fla' requires the fla package")
-            return self._forward_fla(gates, chunk_mask)
+                warnings.warn(
+                    "kda_impl='fla' but fla is unavailable; falling back to the torch recurrence",
+                    stacklevel=2,
+                )
+            else:
+                return self._forward_fla(gates, chunk_mask)
         return self._forward_torch(gates, chunk_mask)
 
     def _forward_fla(self, gates: dict[str, torch.Tensor], chunk_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -258,6 +276,72 @@ class KDAStateMachine(nn.Module):
             read = read.reshape(bsz, q.size(0), heads * dv).to(k.dtype)
         package = self.realign(read)
         return package, state.norm(dim=(-2, -1)).mean()
+
+    def init_stream_state(self, bsz: int, device: torch.device | str) -> torch.Tensor:
+        """Zero KDA state for incremental/streaming encoding (inference side)."""
+        c = self.c
+        return torch.zeros(
+            bsz, c.kda_heads, c.kda_head_k, c.kda_head_v, device=device, dtype=torch.float32
+        )
+
+    @torch.no_grad()
+    def stream_step(
+        self, gates_i: dict[str, torch.Tensor], state: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Consume ONE chunk's write gates, read the updated state, carry it on.
+
+        Streaming primitive: encoding chunk-by-chunk with a carried state avoids
+        recomputing the recurrence from scratch for every prefix (O(C^2) ->
+        O(C)). ``gates_i`` holds one chunk (shapes (B, 1, H, K/V) etc., as
+        produced by WriteHead on a single memory row). Returns
+        ``(package_i, new_state)`` where ``package_i`` is (B, 1, nq, d_pack),
+        matching column i of the batched per-chunk package. Uses the fla
+        fused-recurrent kernel when ``kda_impl == "fla"`` (falling back to the
+        pure-torch update when fla is unavailable).
+        """
+        c = self.c
+        if c.kda_impl == "fla" and _fla_chunk_kda is not None:
+            from fla.ops.kda import fused_recurrent_kda
+
+            k, v, beta, alpha = gates_i["k"], gates_i["v"], gates_i["beta"], gates_i["alpha"]
+            bsz = k.size(0)
+            g = torch.log(alpha.clamp_min(1.0e-6)).to(k.dtype).expand(bsz, 1, -1, -1).contiguous()
+            q = self.readout_query
+            outs = []
+            new_state = state
+            for qi in range(q.size(0)):
+                o, new_state = fused_recurrent_kda(
+                    q=q[qi].to(k.dtype).unsqueeze(0).unsqueeze(0).expand(bsz, 1, -1, -1).contiguous(),
+                    k=k,
+                    v=v,
+                    g=g,
+                    beta=beta,
+                    scale=1.0,
+                    initial_state=state,
+                    output_final_state=True,
+                    use_qk_l2norm_in_kernel=False,
+                )
+                outs.append(o)
+            o = torch.stack(outs, dim=2)  # (B, 1, nq, H, V)
+            read = o.reshape(bsz, 1, q.size(0), c.kda_heads * c.kda_head_v)
+            return self.realign(read), new_state
+
+        # Pure-torch fallback: same update math as _forward_torch, one chunk.
+        k, v, beta = gates_i["k"], gates_i["v"], gates_i["beta"]
+        bsz = k.size(0)
+        heads, dv = c.kda_heads, c.kda_head_v
+        kf, vf = k.float(), v.float()
+        bi = beta.float()[:, 0]  # (B, H) — a real chunk, mask == 1
+        ai = gates_i["alpha"][0].float().unsqueeze(-1)  # (1, H, K, 1)
+        ki, vi = kf[:, 0], vf[:, 0]
+        state = ai * state
+        kTs = torch.einsum("bhk,bhkv->bhv", ki, state)
+        state = state - bi.view(bsz, heads, 1, 1) * ki.unsqueeze(-1) * kTs.unsqueeze(-2)
+        state = state + bi.view(bsz, heads, 1, 1) * ki.unsqueeze(-1) * vi.unsqueeze(-2)
+        q = self.readout_query.float()
+        read = torch.einsum("qhk,bhkv->bqhv", q, state)
+        read = read.reshape(bsz, 1, q.size(0), heads * dv).to(k.dtype)
+        return self.realign(read), state
 
 
 class PointwiseBackbone(nn.Module):

@@ -83,6 +83,7 @@ def build_model(args: Namespace) -> FLUEDV36:
             prefix_task=args.prefix_task,
             prefix_positions=args.prefix_positions,
             kda_impl=args.kda_impl,
+            state_channel=getattr(args, "state_channel", True),
         )
     )
 
@@ -225,7 +226,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--summarizer-dit-layers", type=int, default=2)
     parser.add_argument("--prefix-task", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--prefix-positions", type=int, default=4)
-    parser.add_argument("--kda-impl", choices=["torch", "fla"], default="torch")
+    parser.add_argument("--kda-impl", choices=["torch", "fla"], default="fla")
+    parser.add_argument(
+        "--state-channel",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="off = R1 relative baseline: per-chunk readout straight from the "
+        "write, no serial KDA state channel (spec section 4)",
+    )
     parser.add_argument("--eval-only", default="", help="path to a checkpoint; run evaluate() on it and exit")
     parser.add_argument("--mask-prob", type=float, default=0.05)
     parser.add_argument("--mask-span-min", type=int, default=1)

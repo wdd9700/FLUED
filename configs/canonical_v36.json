@@ -1,5 +1,5 @@
 {
-  "canonical_version": "v36.5-20260805",
+  "canonical_version": "v36.6-20260806",
   "evidence_base": "S0′′ 双源教师（E30：direct 0.836/unmasked 0.830/PPL 2.25/masked 0.160，attn 主干，当前最强基线）+ 40/60 混合 mask（E28）+ S0.8 DiT summarizer（E24）+ 逐段条件化（E23）+ 预测任务 v2.1（冻结 decoder CE + encoder 侧 detach，E31 负结果修复）+ per-readout 主干判死（E32：encoder 监督密度饥荒/锚爆炸，mlp 保留为开关，causal-attn 变体为候选后续）",
   "supersedes": "configs/canonical_v36.json v36.4（attn 主干 + 预测 v2，保留归档）；v36.3（predict 纯潜空间 MSE）；v35 旧口径保留有效",
   "usage_note": "v3.6 当前默认：S0′′ 预训 byte embedder+segmentor 冻结接管、DiT summarizer、逐段条件化读出、动态边界、4× KDA 状态、40/60 混合 mask、预测任务 v2（冻结 decoder CE + 0.1 潜空间锚）、**per-readout 主干（backbone_mode=mlp：每个 readout 独立变换，跨段语境全部由 KDA 递归承载，补全/预测严格因果，训练形态=流式生成形态）**；训练入口为 tools/train/v3_6/train_v36_s1.py。data_path 为占位符，正式运行必须显式传 --data-path。",
@@ -78,5 +78,6 @@
   "freeze_prefixes": "byte_lookup,encoder_blocks,segmentor_blocks,segmentor_head",
   "per_chunk_readout": true,
   "summarizer_type": "dit",
-  "summarizer_dit_layers": 2
+  "summarizer_dit_layers": 2,
+  "kda_impl": "fla"
 }

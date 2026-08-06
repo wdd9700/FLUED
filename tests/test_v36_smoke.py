@@ -235,3 +235,79 @@ def test_pointwise_backbone_is_per_readout():
         perm = [2, 0, 3, 1]
         out_perm = model.backbone(x[:, perm])
     assert torch.allclose(out_perm, out[:, perm], atol=1e-5)
+
+
+def _stream_columns(model, gates, n_chunks):
+    sm = model.state_machine
+    state = sm.init_stream_state(gates["k"].size(0), gates["k"].device)
+    cols = []
+    for i in range(n_chunks):
+        gi = {k: (v[:, i : i + 1] if k != "alpha" else v) for k, v in gates.items()}
+        pkg_i, state = sm.stream_step(gi, state)
+        cols.append(pkg_i)
+    return torch.cat(cols, dim=1)
+
+
+def test_state_channel_off_is_chunk_local():
+    """R1 relative-baseline form (spec section 4): with state_channel=False
+    each package column depends ONLY on its own chunk -- permuting chunks
+    permutes columns. The default (state channel on) must break that property."""
+    torch.manual_seed(0)
+    cfg = tiny_config(per_chunk_readout=True, state_channel=False)
+    model = FLUEDV36(cfg)
+    memory = torch.randn(2, 3, cfg.d_mem)
+    chunk_mask = torch.ones(2, 3, dtype=torch.bool)
+    perm = [2, 0, 1]
+    with torch.no_grad():
+        gates = model.write_head(memory)
+        package, state_norm = model.state_machine(gates, chunk_mask)
+        gates_p = {k: (v[:, perm] if k in ("k", "v", "beta") else v) for k, v in gates.items()}
+        package_p, _ = model.state_machine(gates_p, chunk_mask)
+    assert state_norm.item() == 0.0
+    assert torch.allclose(package_p, package[:, perm], atol=1e-5)
+    # default: serial channel on -> later columns carry earlier-chunk history
+    model2 = FLUEDV36(tiny_config(per_chunk_readout=True))
+    with torch.no_grad():
+        gates2 = model2.write_head(memory)
+        p2, sn2 = model2.state_machine(gates2, chunk_mask)
+        gates2_p = {k: (v[:, perm] if k in ("k", "v", "beta") else v) for k, v in gates2.items()}
+        p2p, _ = model2.state_machine(gates2_p, chunk_mask)
+    assert sn2.item() > 0
+    assert not torch.allclose(p2p, p2[:, perm], atol=1e-5)
+
+
+def test_kda_stream_step_matches_batched_torch():
+    """Streaming chunk-by-chunk encoding (carried state) must reproduce the
+    batched per-chunk readout column-for-column -- this is the O(C^2) -> O(C)
+    inference primitive for the paging/generation line."""
+    torch.manual_seed(0)
+    cfg = tiny_config(per_chunk_readout=True)
+    model = FLUEDV36(cfg)
+    memory = torch.randn(2, 3, cfg.d_mem)
+    gates = model.write_head(memory)
+    chunk_mask = torch.ones(2, 3, dtype=torch.bool)
+    with torch.no_grad():
+        package, _ = model.state_machine(gates, chunk_mask)
+        streamed = _stream_columns(model, gates, 3)
+    assert torch.allclose(package, streamed, atol=1e-5)
+
+
+def test_kda_stream_step_fla_matches_batched():
+    import pytest
+
+    if not torch.cuda.is_available():
+        pytest.skip("cuda required")
+    try:
+        import fla.ops.kda  # noqa: F401
+    except Exception:
+        pytest.skip("fla not installed")
+    torch.manual_seed(0)
+    cfg = tiny_config(per_chunk_readout=True, kda_impl="fla")
+    model = FLUEDV36(cfg).cuda()
+    memory = torch.randn(2, 3, cfg.d_mem, device="cuda")
+    gates = model.write_head(memory)
+    chunk_mask = torch.ones(2, 3, dtype=torch.bool, device="cuda")
+    with torch.no_grad():
+        package, _ = model.state_machine(gates, chunk_mask)
+        streamed = _stream_columns(model, gates, 3)
+    assert torch.allclose(package, streamed, atol=5e-2, rtol=5e-2)
