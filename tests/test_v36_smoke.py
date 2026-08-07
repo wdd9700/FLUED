@@ -284,6 +284,48 @@ def test_wide_backbone_decoder_projection():
     assert model.decoder.out_proj.weight.grad is not None and model.decoder.out_proj.weight.grad.abs().sum() > 0
 
 
+def test_paged_boundaries_geometry():
+    from flued.v36.model import paged_boundaries
+
+    mask = torch.zeros(2, 32, dtype=torch.bool)
+    mask[0, :23] = True
+    mask[1, :7] = True
+    boundary, serve = paged_boundaries(mask, 4)
+    assert boundary.shape == (2, 4) and serve.shape == (2, 32)
+    # last boundary is always the final real chunk
+    assert boundary[0, -1].item() == 22 and boundary[1, -1].item() == 6
+    # non-decreasing boundaries
+    assert (boundary[:, 1:] >= boundary[:, :-1]).all()
+    # coverage: the serving read never precedes its chunk (real chunks only)
+    for b, c_real in ((0, 23), (1, 7)):
+        served = boundary[b, serve[b, :c_real]]
+        assert (served >= torch.arange(c_real)).all()
+    # n=1 reproduces final
+    b1, s1 = paged_boundaries(mask, 1)
+    assert b1[0, 0].item() == 22 and (s1 == 0).all()
+
+
+def test_paged_shapes_and_n1_equivalence():
+    torch.manual_seed(0)
+    model = FLUEDV36(tiny_config(per_chunk_readout=True, backbone_readout="paged", paged_reads=3))
+    ids = torch.randint(1, 258, (2, 32))
+    with torch.no_grad():
+        out = model(ids)
+    assert out.backbone_out.shape == (2, 3, 64)
+    assert out.logits_backbone.shape == (2, 4, 8, 258)
+    assert torch.isfinite(out.logits_backbone).all()
+    # paged with n=1 must equal the k=1 "final" form bit-for-bit
+    torch.manual_seed(0)
+    twin = FLUEDV36(tiny_config(per_chunk_readout=True, backbone_readout="final"))
+    with torch.no_grad():
+        ref = twin(ids)
+    m1 = FLUEDV36(tiny_config(per_chunk_readout=True, backbone_readout="paged", paged_reads=1))
+    m1.load_state_dict(twin.state_dict())
+    with torch.no_grad():
+        got = m1(ids)
+    assert torch.allclose(got.logits_backbone, ref.logits_backbone, atol=1e-5)
+
+
 def test_state_channel_off_is_chunk_local():
     """R1 relative-baseline form (spec section 4): with state_channel=False
     each package column depends ONLY on its own chunk -- permuting chunks

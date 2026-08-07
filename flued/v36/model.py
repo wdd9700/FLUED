@@ -66,7 +66,13 @@ class V36Config:
     # conditioning was always for (task density, E23). This is also the demand
     # structure for the state channel: with "final", a state-less readout only
     # holds the last chunk, so whole-window completion forces the recurrence.
+    # "paged" = /n paging (user-ruled 2026-08-07, the only legal nq widening):
+    # the window is divided into n sub-pages, the state is read once at each
+    # sub-page boundary (each read causal to its position), and the backbone
+    # transforms the n read vectors pointwise (sub-page-level causal honesty).
+    # n=1 reproduces "final"; n=C reproduces per-chunk.
     backbone_readout: str = "per_chunk"
+    paged_reads: int = 4
     decoder_hidden: int = 1024
     decoder_layers: int = 3
     max_chunks: int = 64
@@ -353,6 +359,27 @@ class KDAStateMachine(nn.Module):
         return self.realign(read), state
 
 
+def paged_boundaries(chunk_mask: torch.Tensor, n: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """/n paging geometry (backbone_readout="paged", user-ruled 2026-08-07).
+
+    Returns (boundary, serve):
+    - boundary: (B, n) long -- the chunk index whose state read closes sub-page j
+      (each read is causal to its position: it contains chunks 0..boundary).
+    - serve: (B, C) long -- chunk i is conditioned on the FIRST read whose
+      boundary covers it (serve(b,i) = min{ j : boundary(b,j) >= i }), so a read
+      never serves a chunk written after it. n=1 reproduces "final" (the whole
+      window served by the last read); n=C reproduces per-chunk.
+    """
+    device = chunk_mask.device
+    c_real = chunk_mask.long().sum(dim=1).clamp(min=1)  # (B,)
+    j = torch.arange(n, device=device)
+    boundary = ((j + 1).unsqueeze(0) * c_real.unsqueeze(1) // n - 1).clamp(min=0)
+    boundary = torch.minimum(boundary, (c_real - 1).unsqueeze(1))  # (B, n)
+    i = torch.arange(chunk_mask.size(1), device=device)
+    serve = (boundary.unsqueeze(2) < i.view(1, 1, -1)).sum(dim=1).clamp(max=n - 1)  # (B, C)
+    return boundary, serve
+
+
 class PointwiseBackbone(nn.Module):
     """Per-readout backbone (v36.5): each chunk's readout vector is transformed
     independently — cross-chunk sequence modeling belongs to the KDA recurrence,
@@ -548,9 +575,20 @@ class FLUEDV36(nn.Module):
                 last = chunks.chunk_mask.long().sum(dim=1).clamp(min=1) - 1
                 ar = torch.arange(content.size(0), device=content.device)
                 backbone_out = self.backbone(content[ar, last].unsqueeze(1))
+                cond_backbone = backbone_out + pos  # (B,1,d) broadcasts over chunks
+            elif self.config.backbone_readout == "paged":
+                if self.config.prefix_task:
+                    raise ValueError("prefix_task requires backbone_readout='per_chunk'")
+                boundary, serve = paged_boundaries(chunks.chunk_mask, self.config.paged_reads)
+                reads = content.gather(1, boundary.unsqueeze(-1).expand(-1, -1, content.size(-1)))
+                paged_out = self.backbone(reads)  # (B, n, d_bb) — pointwise per read
+                backbone_out = paged_out
+                cond_backbone = paged_out.gather(
+                    1, serve.unsqueeze(-1).expand(-1, -1, paged_out.size(-1))
+                ) + pos
             else:
                 backbone_out = self.backbone(content)
-            cond_backbone = backbone_out + pos  # (B,1,d) broadcasts over chunks in final mode
+                cond_backbone = backbone_out + pos
             prefix = None
             if self.config.prefix_task:
                 # Streaming prefix task: at position i, condition on the readout

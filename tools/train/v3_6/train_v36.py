@@ -67,6 +67,7 @@ def build_model(args: Namespace) -> FLUEDV36:
             backbone_ffn=args.backbone_ffn,
             backbone_mode=getattr(args, "backbone_mode", "attn"),
             backbone_readout=getattr(args, "backbone_readout", "per_chunk"),
+            paged_reads=getattr(args, "paged_reads", 4),
             decoder_hidden=args.decoder_hidden,
             decoder_layers=args.decoder_layers,
             max_chunks=args.max_chunks,
@@ -213,10 +214,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backbone-mode", choices=["attn", "mlp"], default="attn")
     parser.add_argument(
         "--backbone-readout",
-        choices=["per_chunk", "final"],
+        choices=["per_chunk", "final", "paged"],
         default="per_chunk",
-        help="final = k=1 backbone interface: backbone consumes only the final state readout",
+        help="final = k=1 backbone interface (only the final state readout); "
+        "paged = /n paging (one causal read per sub-page boundary)",
     )
+    parser.add_argument("--paged-reads", type=int, default=4)
     parser.add_argument("--decoder-hidden", type=int, default=1024)
     parser.add_argument("--decoder-layers", type=int, default=3)
     parser.add_argument("--max-chunks", type=int, default=64)

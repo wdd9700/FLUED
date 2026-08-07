@@ -52,6 +52,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from flued.data import BYTE_OFFSET, MASK_ID, PAD_ID  # noqa: E402
+from flued.v36.model import paged_boundaries  # noqa: E402
 from tools.train.v3_3.train_v33 import (  # noqa: E402
     _append_jsonl,
     _cosine_with_warmup,
@@ -196,9 +197,20 @@ def s1_forward(model, source: torch.Tensor, args) -> dict:
         last = chunks.chunk_mask.long().sum(dim=1).clamp(min=1) - 1
         ar = torch.arange(content.size(0), device=content.device)
         backbone_out = model.backbone(content[ar, last].unsqueeze(1))
+        cond_backbone = backbone_out + pos
+    elif getattr(model.config, "backbone_readout", "per_chunk") == "paged":
+        # /n paging (user-ruled 2026-08-07): one state read per sub-page
+        # boundary; chunk i is conditioned on the first read covering it.
+        boundary, serve = paged_boundaries(chunks.chunk_mask, model.config.paged_reads)
+        reads = content.gather(1, boundary.unsqueeze(-1).expand(-1, -1, content.size(-1)))
+        paged_out = model.backbone(reads)
+        backbone_out = paged_out
+        cond_backbone = paged_out.gather(
+            1, serve.unsqueeze(-1).expand(-1, -1, paged_out.size(-1))
+        ) + pos
     else:
         backbone_out = model.backbone(content)
-    cond_backbone = backbone_out + pos  # (B,1,d) broadcasts over chunks in final mode
+        cond_backbone = backbone_out + pos
     logits_direct = model.decoder(cond_direct, chunks.token_mask)
     logits_backbone = model.decoder(cond_backbone, chunks.token_mask)
     return {
@@ -275,8 +287,8 @@ def step_model(model, batch, args, device, train: bool):
     direct_loss = _ce(out["logits_direct"], encoded_targets, encoded_slot_mask)
     completion_loss = _ce(out["logits_backbone"], targets, slot_mask)
 
-    if getattr(args, "backbone_readout", "per_chunk") == "final":
-        # k=1: predict the LAST real chunk from the penultimate readout -- the
+    if getattr(args, "backbone_readout", "per_chunk") in ("final", "paged"):
+        # k=1 / paged: predict the LAST real chunk from the penultimate readout -- the
         # only in-window pair whose input still carries the full preceding
         # context through the state (chunk-level autoregression form).
         last = chunks.chunk_mask.long().sum(dim=1).clamp(min=2) - 1
@@ -398,9 +410,9 @@ def main() -> None:
     args = parser.parse_args()
     if not args.per_chunk_readout:
         raise SystemExit("S1.0 requires --per-chunk-readout")
-    if getattr(args, "backbone_readout", "per_chunk") == "final" and args.predict_mode == "decode":
+    if getattr(args, "backbone_readout", "per_chunk") != "per_chunk" and args.predict_mode == "decode":
         raise SystemExit(
-            "--backbone-readout final supports --predict-mode latent only "
+            "--backbone-readout final/paged supports --predict-mode latent only "
             "(decode CE is the E34-poisoned loss form)"
         )
     if args.mask_mode == "mixed":
