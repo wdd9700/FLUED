@@ -17,6 +17,7 @@ import warnings
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as _grad_checkpoint
 
 from flued.data import PAD_ID
 from flued.v33.chunk_builder import ChunkBatch, ChunkBuilder
@@ -423,6 +424,12 @@ class GlobalSpanDecoder(nn.Module):
         self.out_proj = (
             nn.Linear(c.d_backbone, c.d_byte, bias=False) if c.d_backbone != c.d_byte else nn.Identity()
         )
+        # Gradient-checkpoint gate. The frozen-predict path (functional_call with
+        # detached params) must NOT checkpoint: the backward recompute would run
+        # outside the param substitution and see the live grad-requiring params
+        # (CheckpointError metadata mismatch). train_v36_s1 toggles this off
+        # around _frozen_decoder_logits.
+        self._ckpt_enabled = True
         self.scale = nn.Parameter(torch.tensor(10.0))
 
     def forward(self, cond: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
@@ -432,7 +439,15 @@ class GlobalSpanDecoder(nn.Module):
         valid = token_mask.reshape(bsz * chunks, -1)
         noise = h.new_zeros(h.size(0))
         for block in self.blocks:
-            h = block(h, valid, noise)
+            # Gradient checkpointing in training: at d_backbone=1536 the decoder
+            # blocks dominate activation memory and push the allocator into the
+            # thrash zone (observed 15.5GB / ~14s per step); recompute trades
+            # ~30% FLOPs for getting back under the red line. Eval and the
+            # frozen-predict ruler path skip it (no graph to save).
+            if self.training and self._ckpt_enabled and torch.is_grad_enabled():
+                h = _grad_checkpoint(block, h, valid, noise, use_reentrant=False)
+            else:
+                h = block(h, valid, noise)
         h = self.out_proj(h)
         vocab = torch.arange(258, device=h.device)
         table = self.byte_lookup(vocab).to(h.dtype)

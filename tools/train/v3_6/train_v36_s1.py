@@ -236,7 +236,13 @@ def _frozen_decoder_logits(model, cond: torch.Tensor, token_mask: torch.Tensor) 
 
     params = {k: v.detach() for k, v in model.decoder.named_parameters()}
     buffers = {k: v for k, v in model.decoder.named_buffers()}
-    return functional_call(model.decoder, (params, buffers), (cond, token_mask))
+    # Checkpointing is incompatible with functional_call's param substitution
+    # (backward recompute would see the live params) -- disable it for this call.
+    model.decoder._ckpt_enabled = False
+    try:
+        return functional_call(model.decoder, (params, buffers), (cond, token_mask))
+    finally:
+        model.decoder._ckpt_enabled = True
 
 
 def step_model(model, batch, args, device, train: bool):
