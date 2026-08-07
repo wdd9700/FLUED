@@ -58,6 +58,14 @@ class V36Config:
     backbone_nhead: int = 8
     backbone_ffn: int = 1024
     backbone_mode: str = "attn"  # "attn" = cross-chunk attention (default; E30 baseline). "mlp" = per-readout, JUDGED DEAD by E32 (encoder gradient starvation / anchor blowup) -- retained behind the flag for the causal-attention follow-up.
+    # "per_chunk" (default, current form): the backbone consumes all C per-chunk
+    # readouts. "final" = k=1 backbone interface (user-ruled 2026-08-06): the
+    # backbone consumes ONLY the final state's readout (carries 0..C history);
+    # per-chunk readouts stay on the decoder side, which is what per-chunk
+    # conditioning was always for (task density, E23). This is also the demand
+    # structure for the state channel: with "final", a state-less readout only
+    # holds the last chunk, so whole-window completion forces the recurrence.
+    backbone_readout: str = "per_chunk"
     decoder_hidden: int = 1024
     decoder_layers: int = 3
     max_chunks: int = 64
@@ -510,11 +518,18 @@ class FLUEDV36(nn.Module):
         if self.config.per_chunk_readout:
             # package: (B, C, q, d_pack) — one conditioning vector per chunk.
             content = package.mean(dim=2)
-            backbone_out = self.backbone(content)
             n_chunks = chunks.chunk_mask.size(1)
             pos = self.chunk_pos.weight.unsqueeze(0)[:, :n_chunks]
             cond_direct = self.decoder_in(content) + pos
-            cond_backbone = backbone_out + pos
+            if self.config.backbone_readout == "final":
+                if self.config.prefix_task:
+                    raise ValueError("prefix_task requires backbone_readout='per_chunk'")
+                last = chunks.chunk_mask.long().sum(dim=1).clamp(min=1) - 1
+                ar = torch.arange(content.size(0), device=content.device)
+                backbone_out = self.backbone(content[ar, last].unsqueeze(1))
+            else:
+                backbone_out = self.backbone(content)
+            cond_backbone = backbone_out + pos  # (B,1,d) broadcasts over chunks in final mode
             prefix = None
             if self.config.prefix_task:
                 # Streaming prefix task: at position i, condition on the readout

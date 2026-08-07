@@ -73,6 +73,7 @@ Full project status: [README.md](README.md) · Versioned documentation: [docs/RE
 - **Tied inverse**: blocks reversed, MHA/FFN subtracted instead of added. Forward and inverse share parameters. `dropout=0.0` in E1 (tied inverse is dropout-sensitive).
 - **E1 presets**: `smoke_cpu`, `small_gpu`, `class300m_16gb` — defined in `flued/e1_stage_a.py`
 - **skip_hard**: Always pass `skip_hard=True` during training/eval. Hard segmentation is for logging only.
+- **归档盘（2026-08-06 起）**：新归档落 `K:\FLUED_archive\<run_name>`（含 SHA256SUMS）；存量 `L:\FLUED_archive` 只读、不迁移，历史文档中的 L: 路径保持有效（含 canonical 的 `init_checkpoint`）。
 
 ## 协作协议（2026-08-06 与用户共同制定）
 

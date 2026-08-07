@@ -248,6 +248,25 @@ def _stream_columns(model, gates, n_chunks):
     return torch.cat(cols, dim=1)
 
 
+def test_backbone_readout_final_is_k1():
+    """k=1 backbone interface (user-ruled 2026-08-06): in final mode the
+    backbone output is a single conditioning vector per sample (the transform
+    of the final state's readout), while decoding still covers every chunk."""
+    torch.manual_seed(0)
+    model = FLUEDV36(tiny_config(per_chunk_readout=True, backbone_readout="final"))
+    ids = torch.randint(1, 258, (2, 32))
+    with torch.no_grad():
+        out = model(ids)
+    assert out.backbone_out.size(1) == 1
+    assert out.logits_backbone.shape == (2, 4, 8, 258)
+    assert torch.isfinite(out.logits_backbone).all()
+    # default stays per-chunk (C readouts)
+    model2 = FLUEDV36(tiny_config(per_chunk_readout=True))
+    with torch.no_grad():
+        out2 = model2(ids)
+    assert out2.backbone_out.size(1) == out2.chunks.span_embeddings.size(1)
+
+
 def test_state_channel_off_is_chunk_local():
     """R1 relative-baseline form (spec section 4): with state_channel=False
     each package column depends ONLY on its own chunk -- permuting chunks

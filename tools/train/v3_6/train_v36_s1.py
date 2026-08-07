@@ -185,11 +185,20 @@ def s1_forward(model, source: torch.Tensor, args) -> dict:
     if not model.config.per_chunk_readout:
         raise ValueError("S1.0 requires per_chunk_readout=True")
     content = package.mean(dim=2)  # (B, C, d_pack) — readout of S_i per chunk
-    backbone_out = model.backbone(content)
     n_chunks = chunks.chunk_mask.size(1)
     pos = model.chunk_pos.weight.unsqueeze(0)[:, :n_chunks]
     cond_direct = model.decoder_in(content) + pos
-    cond_backbone = backbone_out + pos
+    if getattr(model.config, "backbone_readout", "per_chunk") == "final":
+        # k=1 backbone interface (user-ruled 2026-08-06): the backbone consumes
+        # ONLY the final state's readout (carries 0..C history through the
+        # recurrence). Per-chunk readouts stay decoder-side, which is what
+        # per-chunk conditioning was always for (task density, E23).
+        last = chunks.chunk_mask.long().sum(dim=1).clamp(min=1) - 1
+        ar = torch.arange(content.size(0), device=content.device)
+        backbone_out = model.backbone(content[ar, last].unsqueeze(1))
+    else:
+        backbone_out = model.backbone(content)
+    cond_backbone = backbone_out + pos  # (B,1,d) broadcasts over chunks in final mode
     logits_direct = model.decoder(cond_direct, chunks.token_mask)
     logits_backbone = model.decoder(cond_backbone, chunks.token_mask)
     return {
@@ -260,15 +269,30 @@ def step_model(model, batch, args, device, train: bool):
     direct_loss = _ce(out["logits_direct"], encoded_targets, encoded_slot_mask)
     completion_loss = _ce(out["logits_backbone"], targets, slot_mask)
 
-    backbone_out = out["backbone_out"].float()
-    pair_mask = (chunks.chunk_mask[:, :-1] & chunks.chunk_mask[:, 1:]).float()
-    pred = backbone_out[:, :-1]
-    with torch.no_grad():
-        tgt = model.decoder_in(out["content"].float())[:, 1:].detach()
-    se = ((pred - tgt).square().mean(dim=-1) * pair_mask).sum() / pair_mask.sum().clamp(min=1.0)
-    with torch.no_grad():
-        cos = F.cosine_similarity(pred, tgt.float(), dim=-1)
-        predict_cos = (cos * pair_mask).sum() / pair_mask.sum().clamp(min=1.0)
+    if getattr(args, "backbone_readout", "per_chunk") == "final":
+        # k=1: predict the LAST real chunk from the penultimate readout -- the
+        # only in-window pair whose input still carries the full preceding
+        # context through the state (chunk-level autoregression form).
+        last = chunks.chunk_mask.long().sum(dim=1).clamp(min=2) - 1
+        ar = torch.arange(out["content"].size(0), device=device)
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.amp and device.type == "cuda"):
+            pred = model.backbone(out["content"][ar, last - 1].unsqueeze(1)).float().squeeze(1)
+        with torch.no_grad():
+            tgt = model.decoder_in(out["content"].float())[ar, last].detach()
+        se = (pred - tgt).square().mean(dim=-1).mean()
+        with torch.no_grad():
+            predict_cos = F.cosine_similarity(pred, tgt, dim=-1).mean()
+        pair_mask = chunks.chunk_mask.new_ones((1,))  # placeholder, unused in final mode
+    else:
+        backbone_out = out["backbone_out"].float()
+        pair_mask = (chunks.chunk_mask[:, :-1] & chunks.chunk_mask[:, 1:]).float()
+        pred = backbone_out[:, :-1]
+        with torch.no_grad():
+            tgt = model.decoder_in(out["content"].float())[:, 1:].detach()
+        se = ((pred - tgt).square().mean(dim=-1) * pair_mask).sum() / pair_mask.sum().clamp(min=1.0)
+        with torch.no_grad():
+            cos = F.cosine_similarity(pred, tgt.float(), dim=-1)
+            predict_cos = (cos * pair_mask).sum() / pair_mask.sum().clamp(min=1.0)
 
     predict_mode = getattr(args, "predict_mode", "latent")
     predict_ce = torch.zeros((), device=device)
@@ -368,6 +392,11 @@ def main() -> None:
     args = parser.parse_args()
     if not args.per_chunk_readout:
         raise SystemExit("S1.0 requires --per-chunk-readout")
+    if getattr(args, "backbone_readout", "per_chunk") == "final" and args.predict_mode == "decode":
+        raise SystemExit(
+            "--backbone-readout final supports --predict-mode latent only "
+            "(decode CE is the E34-poisoned loss form)"
+        )
     if args.mask_mode == "mixed":
         _load_bpe_tokenizer(args.bpe_tokenizer_path)
     _MASK_GENERATOR.manual_seed(args.seed)
