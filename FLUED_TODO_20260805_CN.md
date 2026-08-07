@@ -65,6 +65,7 @@ v36.4/v36.5 三臂（s13 预测 v2.0 / s14 per-readout+锚0.1 / s14b per-readout
 - state_norm 上行（S1.0 16.3 / S0′ 15.4，此前 2-8）：预测任务推高状态范数，bf16 稳定性观察项（K4 NaN 前科）。
 - 1024/2048/4096 scaling 试探（Q6 标定已完成，见 CURRENT_STATE）。
 - FlashKDA 补丁上游 issue（`L:\FLUED_archive\flashkda_msvc_patch_20260802\UPSTREAM_ISSUE_DRAFT_EN.md` 待提交）。
+- **KDA:full-attention 3:1 混合主干候选（2026-08-07 用户提名，规格 §22 框架）**：当前单页尺度（1-23 读出）无长序列可省，不做；主场是多页/档案馆形态的主干——页级读出序列随对话增长，KDA 层任跨页压缩载体（与 encoder 侧段级 KDA 构成两级递归）、full attention 层任精确跨页关联。判决臂预注册：多页 harness 建成后同序列三臂对判（3:1 混合 vs 全注意力 vs 逐点）。实现可复用 `flued/v36/kda_lm.py`（字节嵌入换读出投影）。前置警示：R0 的 KDA-LM 配方在字节级未证明自己（1.80 vs H-Net 0.653），押注前欠一次公平复测。
 - push 状态：main 已被 HEAD（b799c39，v36.2）强制覆盖（2026-08-05，第 4 次重试成功）；分支与 main 同点。
 
 ## 4. 生成线与容量阶梯（2026-08-05 用户裁定）
