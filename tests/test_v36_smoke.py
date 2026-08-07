@@ -267,6 +267,23 @@ def test_backbone_readout_final_is_k1():
     assert out2.backbone_out.size(1) == out2.chunks.span_embeddings.size(1)
 
 
+def test_wide_backbone_decoder_projection():
+    """d_backbone != d_byte (k=1 capacity arms, E38): the decoder projects its
+    states back into the frozen byte-table space via out_proj -- forward/backward
+    must work and the projection must receive gradient."""
+    torch.manual_seed(0)
+    model = FLUEDV36(tiny_config(per_chunk_readout=True, backbone_readout="final", d_backbone=128))
+    ids = torch.randint(1, 258, (2, 32))
+    out = model(ids)
+    assert out.logits_backbone.shape == (2, 4, 8, 258)
+    assert torch.isfinite(out.logits_direct).all() and torch.isfinite(out.logits_backbone).all()
+    from torch import nn
+    assert isinstance(model.decoder.out_proj, nn.Linear)
+    loss = out.logits_backbone.square().mean() + out.logits_direct.square().mean()
+    loss.backward()
+    assert model.decoder.out_proj.weight.grad is not None and model.decoder.out_proj.weight.grad.abs().sum() > 0
+
+
 def test_state_channel_off_is_chunk_local():
     """R1 relative-baseline form (spec section 4): with state_channel=False
     each package column depends ONLY on its own chunk -- permuting chunks

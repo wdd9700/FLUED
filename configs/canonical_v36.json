@@ -1,8 +1,8 @@
 {
   "canonical_version": "v36.7-20260806",
-  "evidence_base": "S0′′ 双源教师（E30：direct 0.836/unmasked 0.830/PPL 2.25/masked 0.160，attn 主干，当前最强基线）+ 40/60 混合 mask（E28）+ S0.8 DiT summarizer（E24）+ 逐段条件化（E23）+ E34 体制定案：预测任务默认回潜空间 MSE（E30 配方；v2 冻结 decoder 字节 CE 在双向 attn 下复制捷径判负，fla 核经 s16 复现赦免）+ E32 per-readout 判死受 v2.1 污染、判决暂停待 s17（mlp+latent）重审",
+  "evidence_base": "S0′′ 双源教师（E30：direct 0.836/unmasked 0.830/PPL 2.25/masked 0.160，attn 主干时代最强基线）+ 40/60 混合 mask（E28）+ S0.8 DiT summarizer（E24）+ 逐段条件化（E23）+ E34 体制定案（预测默认回 latent；v2 字节 CE 双向下复制捷径判负，fla 核经 s16 复现赦免）+ E32 已证伪（s17 平反 per-readout）+ E35 2×2 闭环（512B 状态通道零贡献，形态非本意——规格 §21 限定）+ E36（R0 KDA-LM 双臂远逊 H-Net 锚，处决开关未触发）+ **规格 §21 正本：主干接口 k=1，s20 判别臂在跑**",
   "supersedes": "configs/canonical_v36.json v36.6（fla 默认化）；v36.5（per-readout 默认，E32 判决暂停待重审）；v36.4（attn 主干 + 预测 v2，E34 判负）；v36.3（predict 纯潜空间 MSE）；v35 旧口径保留有效",
-  "usage_note": "v3.6 当前默认：S0′′ 预训 byte embedder+segmentor 冻结接管、DiT summarizer、逐段条件化读出、动态边界、4× KDA 状态、40/60 混合 mask、**预测任务回潜空间 MSE（E30 配方；v2 冻结 decoder 字节 CE 在双向 attn 主干下因复制捷径判负 E34，predict_byte_acc 保留为评测指标）**、attn 主干（E32 对 per-readout 的判死受 v2.1 污染，判决暂停，s17 重审中）、KDA 训练核 fla chunk_kda（torch 保留回退）；训练入口为 tools/train/v3_6/train_v36_s1.py。data_path 为占位符，正式运行必须显式传 --data-path。",
+  "usage_note": "v3.6 当前默认：S0′′ 预训 byte embedder+segmentor 冻结接管、DiT summarizer、逐段条件化读出、动态边界、4× KDA 状态、40/60 混合 mask、预测任务潜空间 MSE（E30 配方；v2 字节 CE 判负 E34）、attn 主干（E32 已证伪、E35 2×2 闭环；**主干形态问题已被规格 §21 的 k=1 接口裁定取代——`--backbone-readout final` 已实现，s20 判别结果落地后 canonical 预期翻 final**）、KDA 训练核 fla chunk_kda（torch 保留回退）；训练入口为 tools/train/v3_6/train_v36_s1.py。data_path 为占位符，正式运行必须显式传 --data-path。",
   "run_id": "canonical_v36",
   "out_dir": "checkpoints/canonical_v36",
   "data_path": "data/corpus.txt",

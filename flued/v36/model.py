@@ -416,6 +416,13 @@ class GlobalSpanDecoder(nn.Module):
             [DiTStyleBlock(c.d_backbone, c.backbone_nhead, c.backbone_ffn, True, False) for _ in range(c.decoder_layers)]
         )
         self.byte_lookup = byte_lookup
+        # k=1 capacity arms (E38): when d_backbone != d_byte the decoder cannot
+        # share the byte table directly -- project decoder states back into the
+        # byte-table space with a learned map; the table itself stays the fixed
+        # public ruler (E31/E34: decoder/table geometry must not be trainable).
+        self.out_proj = (
+            nn.Linear(c.d_backbone, c.d_byte, bias=False) if c.d_backbone != c.d_byte else nn.Identity()
+        )
         self.scale = nn.Parameter(torch.tensor(10.0))
 
     def forward(self, cond: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
@@ -426,6 +433,7 @@ class GlobalSpanDecoder(nn.Module):
         noise = h.new_zeros(h.size(0))
         for block in self.blocks:
             h = block(h, valid, noise)
+        h = self.out_proj(h)
         vocab = torch.arange(258, device=h.device)
         table = self.byte_lookup(vocab).to(h.dtype)
         logits = self.scale.clamp(1.0, 100.0) * torch.matmul(
@@ -457,8 +465,6 @@ class FLUEDV36(nn.Module):
             c.max_chunks, c.tau_cut, c.boundary_temperature, c.boundary_bridge_gradient_scale
         )
         self.decoder_in = nn.Linear(c.d_pack, c.d_backbone) if c.d_pack != c.d_backbone else nn.Identity()
-        if c.d_backbone != c.d_byte:
-            raise ValueError("v0 requires d_backbone == d_byte so the decoder shares the encoder byte table")
         self.decoder = GlobalSpanDecoder(c, self.byte_lookup)
         self.chunk_pos = nn.Embedding(c.max_chunks, c.d_backbone)
         nn.init.trunc_normal_(self.chunk_pos.weight, std=0.02)
