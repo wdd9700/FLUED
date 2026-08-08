@@ -130,6 +130,7 @@
 | GRPO | 组相对策略优化（Group Relative Policy Optimization） | 同状态采 G 个候选动作、组内归一化优势、免 value network 的策略梯度方法；v3.6 S0.5 用于边界/写入离散决策 | v3.6 规格附录 A | 外部 | 2026-07-27 | 已注册 |
 | S0 / S0.5 | 段落预训 / GRPO-CBIU 微调 | v3.6 的两段边界学习路线：先用段落标签稠密 BCE 独立训练 segmentor（S0），再用 GRPO+CBIU 反事实奖励微调边界决策（S0.5），接管后软边界桥退役 | v3.6 规格 §10 | 用户+AI(K3) | 2026-07-27 | 已注册 |
 | FlashKDA | FlashKDA（官方 KDA 高性能内核） | 月之暗面官方 CUTLASS KDA 内核：仅前向（推理用）、SM90+/CUDA12.9+/K=V=128；本项目 kda-kernels 环境含 MSVC 对齐修复的本地可用版 | 2026-08-01 检索 | 外部（月之暗面） | 2026-08-01 | 已注册 |
+| LatentMoE | LatentMoE（NVIDIA 低维路由 MoE） | NVIDIA 2026-01（arXiv 2601.18089，Nemotron 3 在用）：token 先压低维 latent 再路由+专家计算，动机是砍 A2A 通信量，节省再投资为更多专家/更高 top-k。对本项目的借鉴：① 流形假设（低维投影不丢信息）的工业级背书——压缩侧非病灶；② "压运输量不压存储量"的区分——读出切片是运输带宽，单固定查询=运输量锁死，正解必须带寻址成分；③ MoE 化写入头（按内容类型条件压缩）属 C3 写入侧组织候选 | 用户提名 2026-08-07 | 外部（NVIDIA） | 2026-08-07 | 已注册 |
 | HNet-DiT | HNet-DiT（DiT 化 H-Net 对照组） | 我方改造的 H-Net 变体：双向注意力+masked infilling 统一口径，用于与 v3.6 同任务公平对比；分标准臂（byte 旁路天花板）与瓶颈臂（砍旁路） | v3.6 规格 §12 | AI(K3)+用户 | 2026-08-02 | 已注册 |
 | 率失真前沿 | 率失真前沿（RD frontier） | 以传输标量总量为率、任务指标为失真的多模型对比曲线；v3.6 的判决口径（前沿对前沿，不比单点） | v3.6 规格 §4/§12 | 用户 | 2026-07-25 | 已注册 |
 | readout 包均值瓶颈 | readout 包均值瓶颈（package-mean bottleneck） | v36 实现中整条 prompt 的 readout 包经 mean(dim=1) 压成单条件向量、全局 span decoder 跨段区分仅靠 chunk_pos 位置嵌入的信息瓶颈 | v3.6 规格 §13 | AI(Kimi) | 2026-08-02 | 候选 |
