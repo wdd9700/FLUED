@@ -95,6 +95,18 @@ class V36Config:
     # transmitted-scalar budget) -- the serial KDA recurrence is bypassed, so
     # the ONLY difference from the main architecture is the state channel.
     state_channel: bool = True
+    # Three-state drafting backbone (spec section 23, user-ruled 2026-08-08):
+    # backbone_mode="draft" swaps the backbone for a DiT that refines a fresh
+    # thinking matrix over T rounds (T sampled in [think_steps_min,
+    # think_steps_max] during training; deterministic stability-stop at eval).
+    # think_visibility: "readout" (arm A: thinking sees only the k=1 readout)
+    # or "readout_memory" (arm B: thinking may also cross-read pre-state
+    # memory rows, strictly causally). think_stop_cos: eval-time halt when the
+    # mean cosine between consecutive thinking matrices exceeds it.
+    think_steps_min: int = 1
+    think_steps_max: int = 16
+    think_visibility: str = "readout"
+    think_stop_cos: float = 0.995
 
 
 @dataclass
@@ -438,6 +450,164 @@ class CrossReadBackbone(nn.Module):
         return self.norm(h)
 
 
+class DraftBackbone(nn.Module):
+    """Three-state drafting backbone (spec SS23, user-ruled 2026-08-08).
+
+    Input state  = ONE k=1 readout vector (its job is gist, not byte fidelity).
+    Thinking state = a fresh matrix (B, C, d) seeded from noise + position and
+    refined by T DiT rounds; each round sees the readout (and, for
+    think_visibility="readout_memory", ALL pre-state memory rows) plus the
+    current thinking matrix. Drafting is a global revision: within one
+    thinking pass the whole offered store is visible (matches deployment --
+    the window is fully encoded before the one-shot output is drafted).
+    Causal honesty lives at the INPUT level: the predict rollout is fed the
+    penultimate readout with memory truncated at last-1 (train_v36_s1.py),
+    so no target-chunk information can enter the draft.
+    T is sampled uniformly from [think_steps_min, think_steps_max] per
+    training call; at eval a deterministic stability-stop (mean cosine
+    between consecutive thinking matrices > think_stop_cos, clamped to the
+    same bounds) decides -- the stop mechanism is the backbone's own
+    dynamics, no extra supervision.
+    Output state = the final thinking matrix, one-shot to the decoder.
+    Thinking steps are UNSUPERVISED: only the output matrix eats task loss
+    (clean output, dirty thinking -- branching/backtracking allowed).
+    """
+
+    def __init__(self, c: V36Config) -> None:
+        super().__init__()
+        self.c = c
+        self.nhead = c.backbone_nhead
+        d = c.d_backbone
+        self.seed = nn.Parameter(torch.randn(1, 1, d) * 0.02)
+        self.time_emb = nn.Embedding(c.think_steps_max + 1, d)
+        self.readout_k = nn.Linear(c.d_pack, d, bias=False)
+        self.readout_v = nn.Linear(c.d_pack, d, bias=False)
+        self.mem_k = nn.Linear(c.d_mem, d, bias=False)
+        self.mem_v = nn.Linear(c.d_mem, d, bias=False)
+        self.q_proj = nn.Linear(d, d, bias=False)
+        self.k_proj = nn.Linear(d, d, bias=False)
+        self.v_proj = nn.Linear(d, d, bias=False)
+        self.q_mem = nn.Linear(d, d, bias=False)
+        self.o_proj = nn.Linear(d, d, bias=False)
+        self.o_mem = nn.Linear(d, d, bias=False)
+        self.blocks = nn.ModuleList(
+            [
+                nn.ModuleDict(
+                    {
+                        "ln_s": nn.LayerNorm(d),
+                        "ln_c": nn.LayerNorm(d),
+                        "ln_f": nn.LayerNorm(d),
+                        "ffn": nn.Sequential(
+                            nn.Linear(d, c.backbone_ffn),
+                            nn.GELU(),
+                            nn.Linear(c.backbone_ffn, d),
+                        ),
+                    }
+                )
+                for _ in range(c.backbone_layers)
+            ]
+        )
+        self.norm = nn.LayerNorm(d)
+        self.last_steps = 0  # eval-time bookkeeping for the think-steps metric
+
+    def _sdpa(self, q, k, v, allowed):
+        # allowed: (B, 1 or nh, Nq, Nk) bool. Fully-masked rows would NaN --
+        # keep the diagonal so a padded query row stays finite (0*NaN poison).
+        o = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed)
+        return o
+
+    def think(
+        self,
+        readout: torch.Tensor,
+        memory: torch.Tensor,
+        chunk_mask: torch.Tensor,
+        pos: torch.Tensor,
+        n_steps: int | None = None,
+    ) -> tuple[torch.Tensor, int]:
+        """readout: (B, d_pack) k=1 input state. memory: (B, C, d_mem) pre-state
+        rows. chunk_mask: (B, C) bool. pos: (1, C, d). Returns the output
+        matrix (B, C, d_backbone) and the number of thinking rounds used."""
+        bsz, n = chunk_mask.shape
+        device, dtype = readout.device, readout.dtype
+        d = self.c.d_backbone
+        nh, hd = self.nhead, d // self.nhead
+        # thinking matrix init: learned seed + position + fresh noise (the
+        # draft starts blank every rollout; content enters via conditioning)
+        h = self.seed + pos.to(dtype) + torch.randn(bsz, n, d, device=device, dtype=dtype)
+        # conditioning store: the readout token is always visible; memory rows
+        # (visibility arm B) are visible strictly causally (slot i <- mem[0..i])
+        rk = self.readout_k(readout).unsqueeze(1)  # (B, 1, d)
+        rv = self.readout_v(readout).unsqueeze(1)
+        if self.c.think_visibility == "readout_memory":
+            ck = torch.cat([rk, self.mem_k(memory)], dim=1)  # (B, 1+C, d)
+            cv = torch.cat([rv, self.mem_v(memory)], dim=1)
+            # the whole offered store is visible within a thinking pass
+            # (global revision); padded memory rows stay excluded
+            cross_allowed = torch.cat(
+                [
+                    torch.ones(bsz, n, 1, dtype=torch.bool, device=device),
+                    chunk_mask.view(bsz, 1, n).expand(bsz, n, n),
+                ],
+                dim=-1,
+            )
+        else:
+            ck, cv = rk, rv
+            cross_allowed = torch.ones(bsz, n, 1, dtype=torch.bool, device=device)
+        self_allowed = chunk_mask.view(bsz, 1, n) & chunk_mask.view(bsz, n, 1)
+        self_allowed = self_allowed | torch.eye(n, dtype=torch.bool, device=device).view(1, n, n)
+        if n_steps is None:
+            if self.training:
+                # CPU-side sampling: a GPU randint + .item() here would sync
+                # the pipeline twice per step (the E33 sync tax).
+                n_steps = int(
+                    torch.randint(self.c.think_steps_min, self.c.think_steps_max + 1, (1,), device="cpu")
+                )
+            else:
+                n_steps = -1  # stability-stop mode (below)
+        max_steps = self.c.think_steps_max
+        steps_used = 0
+        prev = None
+        for t in range(max_steps):
+            steps_used = t + 1
+            h = h + self.time_emb.weight[min(t, max_steps)].to(dtype)
+            for blk in self.blocks:
+                hn = blk["ln_s"](h)
+                q = self.q_proj(hn).view(bsz, n, nh, hd).transpose(1, 2)
+                k = self.k_proj(hn).view(bsz, n, nh, hd).transpose(1, 2)
+                v = self.v_proj(hn).view(bsz, n, nh, hd).transpose(1, 2)
+                o = self._sdpa(q, k, v, self_allowed.unsqueeze(1))
+                h = h + self.o_proj(o.transpose(1, 2).reshape(bsz, n, d))
+                hn = blk["ln_c"](h)
+                qm = self.q_mem(hn).view(bsz, n, nh, hd).transpose(1, 2)
+                km = ck.view(bsz, -1, nh, hd).transpose(1, 2)
+                vm = cv.view(bsz, -1, nh, hd).transpose(1, 2)
+                om = self._sdpa(qm, km, vm, cross_allowed.unsqueeze(1))
+                h = h + self.o_mem(om.transpose(1, 2).reshape(bsz, n, d))
+                h = h + blk["ffn"](blk["ln_f"](h))
+            if n_steps >= 0 and steps_used >= n_steps:
+                break
+            if n_steps < 0 and prev is not None and steps_used >= self.c.think_steps_min:
+                with torch.no_grad():
+                    a = h.float()[chunk_mask]
+                    b = prev.float()[chunk_mask]
+                    stab = F.cosine_similarity(a, b, dim=-1).mean()
+                if float(stab) > self.c.think_stop_cos:
+                    break
+            prev = h
+        self.last_steps = steps_used
+        return self.norm(h), steps_used
+
+    def forward(
+        self,
+        readout: torch.Tensor,
+        memory: torch.Tensor,
+        chunk_mask: torch.Tensor,
+        pos: torch.Tensor,
+        n_steps: int | None = None,
+    ) -> torch.Tensor:
+        return self.think(readout, memory, chunk_mask, pos, n_steps)[0]
+
+
 class PointwiseBackbone(nn.Module):
     """Per-readout backbone (v36.5): each chunk's readout vector is transformed
     independently — cross-chunk sequence modeling belongs to the KDA recurrence,
@@ -564,6 +734,8 @@ class FLUEDV36(nn.Module):
             self.backbone = TinyBackbone(c)
         elif c.backbone_mode == "xattn":
             self.backbone = CrossReadBackbone(c)
+        elif c.backbone_mode == "draft":
+            self.backbone = DraftBackbone(c)
         else:
             self.backbone = PointwiseBackbone(c)
         self.bridge = SoftBoundaryBridge(
@@ -636,6 +808,14 @@ class FLUEDV36(nn.Module):
                 # causal cross-read: queries = per-chunk content, K/V = memory,
                 # position i sees memory[0..i] only
                 backbone_out = self.backbone(content, memory, chunks.chunk_mask, pos)
+                cond_backbone = backbone_out + pos
+            elif self.config.backbone_mode == "draft":
+                # three-state drafting (spec SS23): input = the k=1 final
+                # readout; the DiT backbone refines a fresh thinking matrix
+                # over T rounds; the output matrix conditions each chunk row.
+                last = chunks.chunk_mask.long().sum(dim=1).clamp(min=1) - 1
+                ar = torch.arange(content.size(0), device=content.device)
+                backbone_out = self.backbone(content[ar, last], memory, chunks.chunk_mask, pos)
                 cond_backbone = backbone_out + pos
             elif self.config.backbone_readout == "final":
                 if self.config.prefix_task:

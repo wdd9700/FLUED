@@ -68,6 +68,10 @@ def build_model(args: Namespace) -> FLUEDV36:
             backbone_mode=getattr(args, "backbone_mode", "attn"),
             backbone_readout=getattr(args, "backbone_readout", "per_chunk"),
             paged_reads=getattr(args, "paged_reads", 4),
+            think_steps_min=getattr(args, "think_steps_min", 1),
+            think_steps_max=getattr(args, "think_steps_max", 16),
+            think_visibility=getattr(args, "think_visibility", "readout"),
+            think_stop_cos=getattr(args, "think_stop_cos", 0.995),
             decoder_hidden=args.decoder_hidden,
             decoder_layers=args.decoder_layers,
             max_chunks=args.max_chunks,
@@ -211,7 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backbone-layers", type=int, default=3)
     parser.add_argument("--backbone-nhead", type=int, default=8)
     parser.add_argument("--backbone-ffn", type=int, default=1024)
-    parser.add_argument("--backbone-mode", choices=["attn", "mlp", "xattn"], default="attn")
+    parser.add_argument("--backbone-mode", choices=["attn", "mlp", "xattn", "draft"], default="attn")
     parser.add_argument(
         "--backbone-readout",
         choices=["per_chunk", "final", "paged"],
@@ -220,6 +224,17 @@ def build_parser() -> argparse.ArgumentParser:
         "paged = /n paging (one causal read per sub-page boundary)",
     )
     parser.add_argument("--paged-reads", type=int, default=4)
+    parser.add_argument("--think-steps-min", type=int, default=1)
+    parser.add_argument("--think-steps-max", type=int, default=16)
+    parser.add_argument(
+        "--think-visibility",
+        choices=["readout", "readout_memory"],
+        default="readout",
+        help="draft backbone (spec SS23): readout = thinking sees only the k=1 "
+        "readout (arm A); readout_memory = thinking may also cross-read "
+        "pre-state memory rows (arm B); causal honesty sits at the input level",
+    )
+    parser.add_argument("--think-stop-cos", type=float, default=0.995)
     parser.add_argument("--decoder-hidden", type=int, default=1024)
     parser.add_argument("--decoder-layers", type=int, default=3)
     parser.add_argument("--max-chunks", type=int, default=64)

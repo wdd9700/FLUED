@@ -421,3 +421,81 @@ def test_kda_stream_step_fla_matches_batched():
         package, _ = model.state_machine(gates, chunk_mask)
         streamed = _stream_columns(model, gates, 3)
     assert torch.allclose(package, streamed, atol=5e-2, rtol=5e-2)
+
+
+def test_draft_model_forward_shapes():
+    torch.manual_seed(0)
+    model = FLUEDV36(tiny_config(per_chunk_readout=True, backbone_mode="draft"))
+    ids = torch.randint(1, 258, (2, 32))
+    with torch.no_grad():
+        out = model(ids)
+    assert out.backbone_out.shape == (2, 4, 64)
+    assert out.logits_backbone.shape == (2, 4, 8, 258)
+    assert torch.isfinite(out.logits_backbone).all()
+
+
+def test_draft_memory_padding_rows_excluded():
+    """Draft arm B (readout_memory, spec SS23): padded memory rows are
+    excluded from the thinking store; content at padded rows must not move
+    the output. (Causal honesty is enforced at the INPUT level -- the
+    predict rollout truncates readout/memory -- not by per-row masks.)"""
+    from flued.v36.model import DraftBackbone
+
+    torch.manual_seed(0)
+    cfg = tiny_config(think_visibility="readout_memory")
+    m = DraftBackbone(cfg)
+    readout = torch.randn(2, cfg.d_pack)
+    memory = torch.randn(2, 4, cfg.d_mem)
+    mask = torch.zeros(2, 4, dtype=torch.bool)
+    mask[:, :3] = True
+    pos = torch.randn(1, 4, cfg.d_backbone)
+    with torch.no_grad():
+        torch.manual_seed(1)  # identical draft noise for both calls
+        out, _ = m.think(readout, memory, mask, pos, n_steps=3)
+        memory2 = memory.clone()
+        memory2[:, 3:] = torch.randn(2, 1, cfg.d_mem)  # padded row content
+        torch.manual_seed(1)
+        out2, _ = m.think(readout, memory2, mask, pos, n_steps=3)
+    assert torch.allclose(out[:, :3], out2[:, :3], atol=1e-5)
+
+
+def test_draft_think_steps_bounds():
+    """T is sampled in [min, max] during training; the eval stability-stop
+    respects the same bounds (spec SS23: min/max are the training fallback)."""
+    from flued.v36.model import DraftBackbone
+
+    torch.manual_seed(0)
+    cfg = tiny_config(think_steps_min=3, think_steps_max=5)
+    m = DraftBackbone(cfg)
+    readout = torch.randn(2, cfg.d_pack)
+    memory = torch.randn(2, 4, cfg.d_mem)
+    mask = torch.ones(2, 4, dtype=torch.bool)
+    pos = torch.randn(1, 4, cfg.d_backbone)
+    m.train()
+    for _ in range(8):
+        _, t = m.think(readout, memory, mask, pos)
+        assert 3 <= t <= 5
+    m.eval()
+    with torch.no_grad():
+        _, t = m.think(readout, memory, mask, pos)
+    assert 3 <= t <= 5
+
+
+def test_draft_padding_rows_stay_finite():
+    """Padded thinking rows must not NaN-poison the real ones (the
+    documented 0*NaN padding pitfall)."""
+    from flued.v36.model import DraftBackbone
+
+    torch.manual_seed(0)
+    cfg = tiny_config()
+    m = DraftBackbone(cfg)
+    m.eval()
+    readout = torch.randn(2, cfg.d_pack)
+    memory = torch.randn(2, 4, cfg.d_mem)
+    mask = torch.zeros(2, 4, dtype=torch.bool)
+    mask[0, 0] = True
+    mask[1, :3] = True
+    pos = torch.randn(1, 4, cfg.d_backbone)
+    with torch.no_grad():
+        out, _ = m.think(readout, memory, mask, pos)
+    assert torch.isfinite(out).all()

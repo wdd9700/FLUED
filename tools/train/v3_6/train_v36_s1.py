@@ -194,6 +194,16 @@ def s1_forward(model, source: torch.Tensor, args) -> dict:
         # K/V = pre-state memory, position i sees memory[0..i] only
         backbone_out = model.backbone(content, memory, chunks.chunk_mask, pos)
         cond_backbone = backbone_out + pos
+    elif getattr(model.config, "backbone_mode", "attn") == "draft":
+        # three-state drafting (spec SS23, user-ruled 2026-08-08): input = the
+        # k=1 final readout; the DiT refines a fresh thinking matrix over T
+        # rounds (unsupervised); the output matrix conditions each chunk row.
+        last = chunks.chunk_mask.long().sum(dim=1).clamp(min=1) - 1
+        ar = torch.arange(content.size(0), device=content.device)
+        backbone_out, think_steps = model.backbone.think(
+            content[ar, last], memory, chunks.chunk_mask, pos
+        )
+        cond_backbone = backbone_out + pos
     elif getattr(model.config, "backbone_readout", "per_chunk") == "final":
         # k=1 backbone interface (user-ruled 2026-08-06): the backbone consumes
         # ONLY the final state's readout (carries 0..C history through the
@@ -223,6 +233,8 @@ def s1_forward(model, source: torch.Tensor, args) -> dict:
         "logits_backbone": logits_backbone,
         "content": content,
         "backbone_out": backbone_out,
+        "memory": memory,
+        "think_steps": float(getattr(model.backbone, "last_steps", 0)),
         "chunks": chunks,
         "cut_overflow": cut_overflow,
         "state_norm": state_norm,
@@ -292,7 +304,26 @@ def step_model(model, batch, args, device, train: bool):
     direct_loss = _ce(out["logits_direct"], encoded_targets, encoded_slot_mask)
     completion_loss = _ce(out["logits_backbone"], targets, slot_mask)
 
-    if getattr(args, "backbone_readout", "per_chunk") in ("final", "paged"):
+    if getattr(args, "backbone_mode", "") == "draft":
+        # predict rollout (spec SS23): a second thinking pass whose INPUT is
+        # the penultimate readout S_{last-1} (causal to the target chunk);
+        # arm B's memory view is truncated at last-1. The predict vector is
+        # the mask-mean of the thinking rows (only the clean output is read).
+        last = chunks.chunk_mask.long().sum(dim=1).clamp(min=2) - 1
+        ar = torch.arange(out["content"].size(0), device=device)
+        cidx = torch.arange(chunks.chunk_mask.size(1), device=device).unsqueeze(0)
+        pmask = chunks.chunk_mask & (cidx <= (last - 1).unsqueeze(1))
+        ppos = model.chunk_pos.weight.unsqueeze(0)[:, : chunks.chunk_mask.size(1)]
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.amp and device.type == "cuda"):
+            pthink, _ = model.backbone.think(out["content"][ar, last - 1], out["memory"], pmask, ppos)
+        pred = (pthink.float() * pmask.unsqueeze(-1)).sum(dim=1) / pmask.sum(dim=1, keepdim=True).clamp(min=1)
+        with torch.no_grad():
+            tgt = model.decoder_in(out["content"].float())[ar, last].detach()
+        se = (pred - tgt).square().mean(dim=-1).mean()
+        with torch.no_grad():
+            predict_cos = F.cosine_similarity(pred, tgt, dim=-1).mean()
+        pair_mask = chunks.chunk_mask.new_ones((1,))  # placeholder, unused in draft mode
+    elif getattr(args, "backbone_readout", "per_chunk") in ("final", "paged"):
         # k=1 / paged: predict the LAST real chunk from the penultimate readout -- the
         # only in-window pair whose input still carries the full preceding
         # context through the state (chunk-level autoregression form).
@@ -366,6 +397,7 @@ def step_model(model, batch, args, device, train: bool):
         "hard_cut_fraction": out["hard_cut_fraction"].detach(),
         "state_norm": out["state_norm"].detach(),
         "boundary_confidence_mean": out["boundary_confidence_mean"].detach(),
+        "think_steps": torch.tensor(out["think_steps"], device=loss.device),
     }
     return loss, metrics
 
@@ -418,6 +450,11 @@ def main() -> None:
     if getattr(args, "backbone_readout", "per_chunk") != "per_chunk" and args.predict_mode == "decode":
         raise SystemExit(
             "--backbone-readout final/paged supports --predict-mode latent only "
+            "(decode CE is the E34-poisoned loss form)"
+        )
+    if getattr(args, "backbone_mode", "") == "draft" and args.predict_mode == "decode":
+        raise SystemExit(
+            "--backbone-mode draft supports --predict-mode latent only "
             "(decode CE is the E34-poisoned loss form)"
         )
     if args.mask_mode == "mixed":
