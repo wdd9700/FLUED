@@ -189,7 +189,12 @@ def s1_forward(model, source: torch.Tensor, args) -> dict:
     n_chunks = chunks.chunk_mask.size(1)
     pos = model.chunk_pos.weight.unsqueeze(0)[:, :n_chunks]
     cond_direct = model.decoder_in(content) + pos
-    if getattr(model.config, "backbone_readout", "per_chunk") == "final":
+    if getattr(model.config, "backbone_mode", "attn") == "xattn":
+        # causal cross-read backbone (s31): queries = per-chunk content,
+        # K/V = pre-state memory, position i sees memory[0..i] only
+        backbone_out = model.backbone(content, memory, chunks.chunk_mask, pos)
+        cond_backbone = backbone_out + pos
+    elif getattr(model.config, "backbone_readout", "per_chunk") == "final":
         # k=1 backbone interface (user-ruled 2026-08-06): the backbone consumes
         # ONLY the final state's readout (carries 0..C history through the
         # recurrence). Per-chunk readouts stay decoder-side, which is what

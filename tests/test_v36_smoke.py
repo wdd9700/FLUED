@@ -326,6 +326,38 @@ def test_paged_shapes_and_n1_equivalence():
     assert torch.allclose(got.logits_backbone, ref.logits_backbone, atol=1e-5)
 
 
+def test_xattn_backbone_is_causal():
+    """CrossReadBackbone (s31): outputs at position <=i must be invariant to
+    changes in chunks AFTER i (strict causal cross-read over memory rows)."""
+    from flued.v36.model import CrossReadBackbone
+
+    torch.manual_seed(0)
+    cfg = tiny_config()
+    m = CrossReadBackbone(cfg)
+    content = torch.randn(2, 5, cfg.d_pack)
+    memory = torch.randn(2, 5, cfg.d_mem)
+    mask = torch.ones(2, 5, dtype=torch.bool)
+    pos = torch.randn(1, 5, cfg.d_backbone)
+    with torch.no_grad():
+        out = m(content, memory, mask, pos)
+        content2, memory2 = content.clone(), memory.clone()
+        content2[:, 3:] = torch.randn(2, 2, cfg.d_pack)
+        memory2[:, 3:] = torch.randn(2, 2, cfg.d_mem)
+        out2 = m(content2, memory2, mask, pos)
+    assert torch.allclose(out[:, :3], out2[:, :3], atol=1e-5)
+    assert not torch.allclose(out[:, 3:], out2[:, 3:], atol=1e-3)
+
+
+def test_xattn_model_forward_shapes():
+    torch.manual_seed(0)
+    model = FLUEDV36(tiny_config(per_chunk_readout=True, backbone_mode="xattn"))
+    ids = torch.randint(1, 258, (2, 32))
+    with torch.no_grad():
+        out = model(ids)
+    assert out.logits_backbone.shape == (2, 4, 8, 258)
+    assert torch.isfinite(out.logits_backbone).all()
+
+
 def test_state_channel_off_is_chunk_local():
     """R1 relative-baseline form (spec section 4): with state_channel=False
     each package column depends ONLY on its own chunk -- permuting chunks

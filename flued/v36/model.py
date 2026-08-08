@@ -380,6 +380,64 @@ def paged_boundaries(chunk_mask: torch.Tensor, n: int) -> tuple[torch.Tensor, to
     return boundary, serve
 
 
+class CrossReadBackbone(nn.Module):
+    """Causal cross-read backbone (s31): the backbone issues one query per chunk
+    position and retrieves from the encoder's memory rows STRICTLY causally
+    (position i sees memory[0..i] only). The Kimi-Linear lesson mapped onto
+    FLUED: the KDA state stays the lossy streaming compressor; exact retrieval
+    flows through a thin causal channel over the least-processed store
+    (pre-state memory). Distinct from s16 on both axes: causal (not
+    bidirectional) and reads memory (not state readouts).
+    """
+
+    def __init__(self, c: V36Config) -> None:
+        super().__init__()
+        self.nhead = c.backbone_nhead
+        self.in_proj = nn.Linear(c.d_pack, c.d_backbone) if c.d_pack != c.d_backbone else nn.Identity()
+        self.q_proj = nn.Linear(c.d_backbone, c.d_backbone, bias=False)
+        self.k_proj = nn.Linear(c.d_mem, c.d_backbone, bias=False)
+        self.v_proj = nn.Linear(c.d_mem, c.d_backbone, bias=False)
+        self.o_proj = nn.Linear(c.d_backbone, c.d_backbone, bias=False)
+        self.blocks = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.LayerNorm(c.d_backbone),
+                    nn.Linear(c.d_backbone, c.backbone_ffn),
+                    nn.GELU(),
+                    nn.Linear(c.backbone_ffn, c.d_backbone),
+                )
+                for _ in range(c.backbone_layers)
+            ]
+        )
+        self.norm = nn.LayerNorm(c.d_backbone)
+
+    def forward(
+        self,
+        content: torch.Tensor,
+        memory: torch.Tensor,
+        chunk_mask: torch.Tensor,
+        pos: torch.Tensor,
+    ) -> torch.Tensor:
+        bsz, n, _ = content.shape
+        h = self.in_proj(content)
+        nh = self.nhead
+        hd = h.size(-1) // nh
+        q = (self.q_proj(h) + pos).view(bsz, n, nh, hd).transpose(1, 2)
+        k = self.k_proj(memory).view(bsz, n, nh, hd).transpose(1, 2)
+        v = self.v_proj(memory).view(bsz, n, nh, hd).transpose(1, 2)
+        future = torch.triu(torch.ones(n, n, dtype=torch.bool, device=content.device), diagonal=1)
+        allowed = (~future).view(1, 1, n, n) & chunk_mask.view(bsz, 1, 1, n)
+        # keep the diagonal even on padded rows: a fully-masked SDPA row yields
+        # NaN, and 0*NaN poisons downstream (documented padding-NaN pitfall)
+        allowed = allowed | torch.eye(n, dtype=torch.bool, device=content.device).view(1, 1, n, n)
+        o = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed)
+        o = o.transpose(1, 2).reshape(bsz, n, nh * hd)
+        h = h + self.o_proj(o)
+        for block in self.blocks:
+            h = h + block(h)
+        return self.norm(h)
+
+
 class PointwiseBackbone(nn.Module):
     """Per-readout backbone (v36.5): each chunk's readout vector is transformed
     independently — cross-chunk sequence modeling belongs to the KDA recurrence,
@@ -502,7 +560,12 @@ class FLUEDV36(nn.Module):
         self.summarizer = ChunkSummarizer(c) if c.summarizer_type == "slot" else DiTChunkSummarizer(c)
         self.write_head = WriteHead(c)
         self.state_machine = KDAStateMachine(c)
-        self.backbone = TinyBackbone(c) if c.backbone_mode == "attn" else PointwiseBackbone(c)
+        if c.backbone_mode == "attn":
+            self.backbone = TinyBackbone(c)
+        elif c.backbone_mode == "xattn":
+            self.backbone = CrossReadBackbone(c)
+        else:
+            self.backbone = PointwiseBackbone(c)
         self.bridge = SoftBoundaryBridge(
             c.max_chunks, c.tau_cut, c.boundary_temperature, c.boundary_bridge_gradient_scale
         )
@@ -569,7 +632,12 @@ class FLUEDV36(nn.Module):
             n_chunks = chunks.chunk_mask.size(1)
             pos = self.chunk_pos.weight.unsqueeze(0)[:, :n_chunks]
             cond_direct = self.decoder_in(content) + pos
-            if self.config.backbone_readout == "final":
+            if self.config.backbone_mode == "xattn":
+                # causal cross-read: queries = per-chunk content, K/V = memory,
+                # position i sees memory[0..i] only
+                backbone_out = self.backbone(content, memory, chunks.chunk_mask, pos)
+                cond_backbone = backbone_out + pos
+            elif self.config.backbone_readout == "final":
                 if self.config.prefix_task:
                     raise ValueError("prefix_task requires backbone_readout='per_chunk'")
                 last = chunks.chunk_mask.long().sum(dim=1).clamp(min=1) - 1
